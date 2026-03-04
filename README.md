@@ -106,4 +106,4 @@ Aplikacja wykorzystuje **[sdadas/mmlw-retrieval-roberta-large](https://huggingfa
 | Provider | Zalecany model | Uwagi |
 |---|---|---|
 | Ollama Cloud | `gpt-oss:120b` | Domyślny, najlepsza jakość |
-| Groq | `llama-3.3-70b-versatile` | Szybki, darmowy limit |
+| Groq | `openai/gpt-oss-120b` | J.W. ale działa szybciej|
