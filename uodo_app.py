@@ -46,6 +46,8 @@ OLLAMA_LOCAL_URL = os.getenv("OLLAMA_LOCAL_URL", "http://localhost:11434")
 PROVIDERS = ["Ollama Cloud", "Groq"]
 DEFAULT_PROVIDER = "Ollama Cloud"
 DEFAULT_OLLAMA_MODEL = "gpt-oss:120b"
+DEFAULT_GROQ_MODEL   = "openai/gpt-oss-120b"
+
 
 TOP_K = 8
 GRAPH_DEPTH = 2
@@ -867,10 +869,10 @@ def main():
             api_key = st.text_input(_key_label, type="password")
 
         models = get_available_models(provider, api_key)
-        default_idx = (
-            next((i for i, m in enumerate(models) if DEFAULT_OLLAMA_MODEL in m), 0)
-            if provider == "Ollama Cloud"
-            else 0
+        default_model = DEFAULT_OLLAMA_MODEL if provider == "Ollama Cloud" else DEFAULT_GROQ_MODEL
+        default_idx = next(
+            (i for i, m in enumerate(models) if default_model in m),
+            0
         )
         selected_model = st.selectbox("Model", models, index=default_idx)
 
