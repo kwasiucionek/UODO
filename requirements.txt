@@ -1,0 +1,21 @@
+# Interfejs użytkownika
+streamlit>=1.32.0
+
+# Wektorowa baza danych
+qdrant-client>=1.8.0
+
+# Embeddingi (polski model semantyczny)
+sentence-transformers>=2.6.0
+torch>=2.1.0
+
+# Graf powiązań
+networkx>=3.2
+
+# LLM — Groq
+groq>=0.5.0
+
+# HTTP (Ollama Cloud)
+requests>=2.31.0
+
+# Zmienne środowiskowe
+python-dotenv>=1.0.0
