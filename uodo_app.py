@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-UODO RAG Demo — wyszukiwarka decyzji Prezesa UODO + ustawa o ochronie danych osobowych.
+UODO RAG — wyszukiwarka decyzji Prezesa UODO + ustawa o ochronie danych osobowych.
 
 Uruchomienie:
   streamlit run uodo_app.py
