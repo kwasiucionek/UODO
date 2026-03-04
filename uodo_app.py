@@ -127,11 +127,7 @@ def semantic_search(query: str, top_k: int = TOP_K, filters: Dict = None) -> Lis
     if filters:
         if filters.get("status"):
             must.append(FieldCondition(key="status", match=MatchValue(value=filters["status"])))
-        if filters.get("year_from") or filters.get("year_to"):
-            must.append(FieldCondition(key="year", range=Range(
-                gte=filters.get("year_from", 2000),
-                lte=filters.get("year_to", 2030),
-            )))
+
         if filters.get("keyword"):
             must.append(FieldCondition(key="keywords", match=MatchValue(value=filters["keyword"])))
         if filters.get("doc_types"):
@@ -835,7 +831,7 @@ def main():
         status_filter = st.selectbox(
             "Status", ["— wszystkie —", "prawomocna", "nieprawomocna"]
         )
-        year_range = st.slider("Rok wydania", 2018, 2026, (2018, 2026))
+
         kw_filter = st.text_input(
             "Słowo kluczowe (tag)",
             placeholder="np. Nałożenie kary",
@@ -871,8 +867,7 @@ def main():
     filters = {"doc_types": doc_types}
     if status_filter != "— wszystkie —":
         filters["status"] = status_filter
-    filters["year_from"] = year_range[0]
-    filters["year_to"] = year_range[1]
+
     if kw_filter.strip():
         filters["keyword"] = kw_filter.strip()
 
