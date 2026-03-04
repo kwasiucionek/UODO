@@ -1,6 +1,6 @@
 # 🔐 UODO RAG — Wyszukiwarka Decyzji i Przepisów
 
-Aplikacja RAG (Retrieval-Augmented Generation) do przeszukiwania decyzji Prezesa Urzędu Ochrony Danych Osobowych oraz przepisów ustawy o ochronie danych osobowych.
+Aplikacja RAG (Retrieval-Augmented Generation) do przeszukiwania decyzji Prezesa Urzędu Ochrony Danych Osobowych oraz przepisów ustawy o ochronie danych osobowych i rozporządzenia RODO.
 
 ## Funkcje
 
@@ -9,7 +9,7 @@ Aplikacja RAG (Retrieval-Augmented Generation) do przeszukiwania decyzji Prezesa
 - **Analiza AI** — LLM syntetyzuje odpowiedź z konkretnymi odniesieniami do sygnatur i artykułów ustawy
 - **Wyszukiwanie po tagach** — LLM automatycznie dobiera pasujące słowa kluczowe z bazy, obsługuje formy fleksyjne
 - **Fast path po sygnaturze** — wpisanie sygnatury (np. `DKN.5110.16.2022`) trafia bezpośrednio do decyzji
-- **Dwa typy dokumentów** — decyzje UODO + pełny tekst ustawy o ochronie danych osobowych (Dz.U. 2019 poz. 1781)
+- **Trzy typy dokumentów** — decyzje UODO + ustawa o ochronie danych osobowych + RODO (artykuły i motywy)
 
 ## Architektura
 
@@ -24,6 +24,15 @@ zapytanie użytkownika
         │
         └─► LLM (Ollama Cloud / Groq) → odpowiedź z odniesieniami
 ```
+
+## Baza dokumentów
+
+| Typ | Źródło | Liczba |
+|---|---|---|
+| Decyzje UODO | [orzeczenia.uodo.gov.pl](https://orzeczenia.uodo.gov.pl) | ~560 |
+| Ustawa o ochronie danych (u.o.d.o.) | [Dz.U. 2019 poz. 1781](https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU20190001781) | artykuły 1–110 |
+| RODO — artykuły | [EUR-Lex 32016R0679](https://eur-lex.europa.eu/legal-content/PL/TXT/?uri=CELEX:32016R0679) | 99 artykułów |
+| RODO — motywy | j.w. | 173 motywy |
 
 ## Wymagania systemowe
 
@@ -58,18 +67,36 @@ EMBED_MODEL=sdadas/mmlw-retrieval-roberta-large
 
 ## Przygotowanie bazy danych
 
-Przed uruchomieniem aplikacji należy zaindeksować dane:
+### 1. Decyzje UODO
 
 ```bash
-# 1. Pobierz decyzje UODO z API portalu orzeczeń
+# Pobierz decyzje z API portalu orzeczeń
 python uodo_scraper.py --output uodo_decisions.jsonl
 
-# 2. Zaindeksuj decyzje w Qdrant
+# Zaindeksuj w Qdrant
 python uodo_indexer.py --jsonl uodo_decisions.jsonl
+```
 
-# 3. Zaindeksuj ustawę o ochronie danych osobowych
+### 2. Ustawa o ochronie danych osobowych
+
+```bash
 python uodo_act_indexer.py --md D20191781L.md
 ```
+
+### 3. RODO (rozporządzenie UE 2016/679)
+
+```bash
+# Pobierz i zaindeksuj automatycznie (PDF z EUR-Lex)
+python rodo_indexer.py
+
+# lub z lokalnego pliku PDF
+python rodo_indexer.py --pdf rodo.pdf
+
+# Test parsowania bez indeksowania
+python rodo_indexer.py --dry-run
+```
+
+Skrypt `rodo_indexer.py` indeksuje osobno 99 artykułów (typ `gdpr_article`) oraz 173 motywy preambuły (typ `gdpr_recital`).
 
 ## Uruchomienie
 
@@ -87,15 +114,11 @@ Aplikacja dostępna pod adresem: http://localhost:8501
 ├── uodo_scraper.py      # Scraper decyzji z API portalu UODO
 ├── uodo_indexer.py      # Indeksowanie decyzji w Qdrant
 ├── uodo_act_indexer.py  # Indeksowanie ustawy o ochronie danych
+├── rodo_indexer.py      # Indeksowanie RODO (2016/679) z EUR-Lex
 ├── requirements.txt     # Zależności Python
 ├── .env                 # Klucze API (nie commitować!)
 └── uodo_graph.pkl       # Graf powiązań (generowany automatycznie)
 ```
-
-## Źródła danych
-
-- **Decyzje UODO** — [orzeczenia.uodo.gov.pl](https://orzeczenia.uodo.gov.pl) (REST API)
-- **Ustawa o ochronie danych osobowych** — [Dz.U. 2019 poz. 1781](https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU20190001781)
 
 ## Model embeddingowy
 
@@ -103,7 +126,7 @@ Aplikacja wykorzystuje **[sdadas/mmlw-retrieval-roberta-large](https://huggingfa
 
 ## Modele LLM
 
-| Provider | Zalecany model | Uwagi |
+| Provider | Domyślny model | Uwagi |
 |---|---|---|
 | Ollama Cloud | `gpt-oss:120b` | Domyślny, najlepsza jakość |
-| Groq | `openai/gpt-oss-120b` | J.W. ale działa szybciej|
+| Groq | `openai/gpt-oss-120b` | Szybki, darmowy limit |
