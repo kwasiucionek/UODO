@@ -24,16 +24,17 @@ import json
 import os
 import sys
 import time
-from typing import List, Dict
+from typing import Dict, List
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
 
-QDRANT_URL      = os.getenv("QDRANT_URL", "http://localhost:6333")
-GROQ_API_KEY    = os.getenv("GROQ_API_KEY", "")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OLLAMA_CLOUD_API_KEY = os.getenv("OLLAMA_CLOUD_API_KEY", "")
 OLLAMA_CLOUD_URL = os.getenv("OLLAMA_CLOUD_URL", "https://ollama.com")
 OLLAMA_LOCAL_URL = os.getenv("OLLAMA_LOCAL_URL", "http://localhost:11434")
@@ -44,19 +45,26 @@ OLLAMA_LOCAL_URL = os.getenv("OLLAMA_LOCAL_URL", "http://localhost:11434")
 
 def get_existing_tags(client, collection: str) -> List[str]:
     """Pobiera wszystkie unikalne tagi z decyzji UODO."""
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
     all_tags = set()
     offset = None
     while True:
         pts, next_off = client.scroll(
-            collection_name=collection, limit=500,
-            scroll_filter=Filter(must=[
-                FieldCondition(key="doc_type", match=MatchValue(value="uodo_decision"))
-            ]),
-            with_payload=["keywords"], with_vectors=False,
+            collection_name=collection,
+            limit=500,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="doc_type", match=MatchValue(value="uodo_decision")
+                    )
+                ]
+            ),
+            with_payload=["keywords"],
+            with_vectors=False,
             offset=offset,
         )
-        for pt in (pts or []):
+        for pt in pts or []:
             kws = (pt.payload or {}).get("keywords", [])
             if isinstance(kws, list):
                 all_tags.update(kws)
@@ -69,26 +77,35 @@ def get_existing_tags(client, collection: str) -> List[str]:
 def call_llm(prompt: str, provider: str, model: str, api_key: str) -> str:
     if provider == "groq":
         from groq import Groq
+
         client = Groq(api_key=api_key or GROQ_API_KEY)
         resp = client.chat.completions.create(
-            model=model, max_tokens=200, stream=False,
+            model=model,
+            max_tokens=200,
+            stream=False,
             messages=[{"role": "user", "content": prompt}],
         )
         return resp.choices[0].message.content or ""
 
     elif provider == "ollama":
         import requests
+
         # Spróbuj lokalnie, potem cloud
         for base_url in [OLLAMA_LOCAL_URL, OLLAMA_CLOUD_URL]:
             try:
                 headers = {}
                 if base_url == OLLAMA_CLOUD_URL:
-                    headers["Authorization"] = f"Bearer {api_key or OLLAMA_CLOUD_API_KEY}"
+                    headers["Authorization"] = (
+                        f"Bearer {api_key or OLLAMA_CLOUD_API_KEY}"
+                    )
                 resp = requests.post(
                     f"{base_url}/api/chat",
                     headers=headers,
-                    json={"model": model, "stream": False,
-                          "messages": [{"role": "user", "content": prompt}]},
+                    json={
+                        "model": model,
+                        "stream": False,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
                     timeout=60,
                 )
                 return resp.json().get("message", {}).get("content", "")
@@ -97,9 +114,15 @@ def call_llm(prompt: str, provider: str, model: str, api_key: str) -> str:
     return ""
 
 
-def generate_keywords(article_num: str, content: str, doc_type: str,
-                      existing_tags: List[str], provider: str, model: str,
-                      api_key: str) -> List[str]:
+def generate_keywords(
+    article_num: str,
+    content: str,
+    doc_type: str,
+    existing_tags: List[str],
+    provider: str,
+    model: str,
+    api_key: str,
+) -> List[str]:
     """Generuje keywords dla artykułu przez LLM."""
 
     if doc_type == "legal_act_article":
@@ -120,9 +143,9 @@ def generate_keywords(article_num: str, content: str, doc_type: str,
     prompt = (
         f"Jesteś ekspertem prawa ochrony danych osobowych.\n"
         f"Poniżej jest treść {label} {source}.\n\n"
-        f"Wygeneruj 3–6 słów kluczowych (tagów) opisujących ten przepis.\n"
-        f"Preferuj tagi z poniższej listy (użyj dokładnie tej samej pisowni).\n"
-        f"Możesz dodać nowe tagi jeśli żaden z listy nie pasuje.\n"
+        f"Wygeneruj 6-10 słów kluczowych (tagów) opisujących ten przepis.\n"
+        f"Wybieraj tylko tagi z poniższej listy (użyj dokładnie tej samej pisowni).\n"
+        f"Możesz dodać nowe tagi tylko jeśli żaden z listy nie pasuje.\n"
         f"Odpowiedz TYLKO listą tagów, jeden na linię, bez komentarzy.\n\n"
         f"Treść przepisu:\n{content_short}\n\n"
         f"Dostępne tagi (wybierz pasujące):\n{tags_sample}"
@@ -137,11 +160,18 @@ def generate_keywords(article_num: str, content: str, doc_type: str,
     return keywords[:6]
 
 
-def enrich_documents(qdrant_url: str, collection: str, provider: str,
-                     model: str, api_key: str, doc_types: List[str],
-                     dry_run: bool, delay: float):
+def enrich_documents(
+    qdrant_url: str,
+    collection: str,
+    provider: str,
+    model: str,
+    api_key: str,
+    doc_types: List[str],
+    dry_run: bool,
+    delay: float,
+):
     from qdrant_client import QdrantClient
-    from qdrant_client.models import Filter, FieldCondition, MatchAny
+    from qdrant_client.models import FieldCondition, Filter, MatchAny
 
     client = QdrantClient(url=qdrant_url, timeout=60)
 
@@ -156,13 +186,15 @@ def enrich_documents(qdrant_url: str, collection: str, provider: str,
     while True:
         pts, next_off = client.scroll(
             collection_name=collection,
-            scroll_filter=Filter(must=[
-                FieldCondition(key="doc_type", match=MatchAny(any=doc_types))
-            ]),
-            limit=200, offset=offset,
-            with_payload=True, with_vectors=False,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="doc_type", match=MatchAny(any=doc_types))]
+            ),
+            limit=200,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
         )
-        for pt in (pts or []):
+        for pt in pts or []:
             pay = pt.payload or {}
             kws = pay.get("keywords", [])
             # Pomiń już wzbogacone
@@ -189,8 +221,7 @@ def enrich_documents(qdrant_url: str, collection: str, provider: str,
 
         try:
             keywords = generate_keywords(
-                str(art_num), content, dtype,
-                existing_tags, provider, model, api_key
+                str(art_num), content, dtype, existing_tags, provider, model, api_key
             )
         except Exception as e:
             print(f"BŁĄD LLM: {e}")
@@ -207,7 +238,10 @@ def enrich_documents(qdrant_url: str, collection: str, provider: str,
             try:
                 client.set_payload(
                     collection_name=collection,
-                    payload={"keywords": keywords, "keywords_text": ", ".join(keywords)},
+                    payload={
+                        "keywords": keywords,
+                        "keywords_text": ", ".join(keywords),
+                    },
                     points=[point_id],
                 )
                 ok += 1
@@ -226,16 +260,21 @@ def enrich_documents(qdrant_url: str, collection: str, provider: str,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generuje keywords dla artykułów u.o.d.o. i RODO")
-    parser.add_argument("--qdrant",     default=QDRANT_URL)
+    parser = argparse.ArgumentParser(
+        description="Generuje keywords dla artykułów u.o.d.o. i RODO"
+    )
+    parser.add_argument("--qdrant", default=QDRANT_URL)
     parser.add_argument("--collection", default="uodo_decisions")
-    parser.add_argument("--provider",   default="ollama", choices=["ollama", "groq"])
-    parser.add_argument("--model",      default="qwen3:14b")
-    parser.add_argument("--api-key",    default="")
-    parser.add_argument("--doc-types",  nargs="+",
-                        default=["legal_act_article", "gdpr_article", "gdpr_recital"])
-    parser.add_argument("--dry-run",    action="store_true")
-    parser.add_argument("--delay",      type=float, default=0.5)
+    parser.add_argument("--provider", default="ollama", choices=["ollama", "groq"])
+    parser.add_argument("--model", default="qwen3:14b")
+    parser.add_argument("--api-key", default="")
+    parser.add_argument(
+        "--doc-types",
+        nargs="+",
+        default=["legal_act_article", "gdpr_article", "gdpr_recital"],
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--delay", type=float, default=0.5)
     args = parser.parse_args()
 
     enrich_documents(

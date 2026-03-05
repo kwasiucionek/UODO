@@ -21,9 +21,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue, Range
 
 # Regex dopasowujący sygnaturę decyzji UODO wpisaną bezpośrednio jako query
-_RE_QUERY_SIG = re.compile(
-    r'^\s*([A-Z]{2,6}\.\d{3,5}\.\d+\.\d{4})\s*$', re.IGNORECASE
-)
+_RE_QUERY_SIG = re.compile(r"^\s*([A-Z]{2,6}\.\d{3,5}\.\d+\.\d{4})\s*$", re.IGNORECASE)
 
 # ─────────────────────────── CONFIG ──────────────────────────────
 
@@ -35,28 +33,30 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "sdadas/mmlw-retrieval-roberta-large")
 # Wczytaj .env jeśli istnieje
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
 
-GROQ_API_KEY         = os.getenv("GROQ_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OLLAMA_CLOUD_API_KEY = os.getenv("OLLAMA_CLOUD_API_KEY", "")
-OLLAMA_CLOUD_URL     = os.getenv("OLLAMA_CLOUD_URL", "https://ollama.com")
-OLLAMA_LOCAL_URL     = os.getenv("OLLAMA_LOCAL_URL", "http://localhost:11434")
+OLLAMA_CLOUD_URL = os.getenv("OLLAMA_CLOUD_URL", "https://ollama.com")
+OLLAMA_LOCAL_URL = os.getenv("OLLAMA_LOCAL_URL", "http://localhost:11434")
 
 PROVIDERS = ["Ollama Cloud", "Groq"]
 DEFAULT_PROVIDER = "Ollama Cloud"
 DEFAULT_OLLAMA_MODEL = "gpt-oss:120b"
-DEFAULT_GROQ_MODEL   = "openai/gpt-oss-120b"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 
 TOP_K = 8
 GRAPH_DEPTH = 2
 UODO_PORTAL_BASE = "https://orzeczenia.uodo.gov.pl/document"
-ISAP_ACT_URL  = "https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU20190001781"
-GDPR_URL      = "https://eur-lex.europa.eu/legal-content/PL/TXT/?uri=CELEX:32016R0679"
+ISAP_ACT_URL = "https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU20190001781"
+GDPR_URL = "https://eur-lex.europa.eu/legal-content/PL/TXT/?uri=CELEX:32016R0679"
 
 
 # ─────────────────────────── CACHE / ZASOBY ──────────────────────
+
 
 @st.cache_resource
 def get_qdrant() -> QdrantClient:
@@ -66,6 +66,7 @@ def get_qdrant() -> QdrantClient:
 @st.cache_resource
 def get_embedder():
     from sentence_transformers import SentenceTransformer
+
     return SentenceTransformer(EMBED_MODEL, trust_remote_code=True)
 
 
@@ -80,9 +81,17 @@ def get_graph() -> Optional[nx.DiGraph]:
     offset = None
     while True:
         pts, next_off = client.scroll(
-            collection_name=COLLECTION_NAME, limit=500, offset=offset,
-            with_payload=["signature", "doc_type", "related_uodo_rulings",
-                          "related_acts", "related_eu_acts", "related_court_rulings"],
+            collection_name=COLLECTION_NAME,
+            limit=500,
+            offset=offset,
+            with_payload=[
+                "signature",
+                "doc_type",
+                "related_uodo_rulings",
+                "related_acts",
+                "related_eu_acts",
+                "related_court_rulings",
+            ],
             with_vectors=False,
         )
         for p in pts:
@@ -115,6 +124,7 @@ def get_graph() -> Optional[nx.DiGraph]:
 
 # ─────────────────────────── WYSZUKIWANIE ────────────────────────
 
+
 def embed(text: str) -> List[float]:
     return get_embedder().encode(text, normalize_embeddings=True).tolist()
 
@@ -126,15 +136,20 @@ def semantic_search(query: str, top_k: int = TOP_K, filters: Dict = None) -> Lis
     must = []
     if filters:
         if filters.get("status"):
-            must.append(FieldCondition(key="status", match=MatchValue(value=filters["status"])))
+            must.append(
+                FieldCondition(key="status", match=MatchValue(value=filters["status"]))
+            )
 
         if filters.get("keyword"):
-            must.append(FieldCondition(key="keywords", match=MatchValue(value=filters["keyword"])))
+            must.append(
+                FieldCondition(
+                    key="keywords", match=MatchValue(value=filters["keyword"])
+                )
+            )
         if filters.get("doc_types"):
-            must.append(FieldCondition(
-                key="doc_type",
-                match=MatchAny(any=filters["doc_types"])
-            ))
+            must.append(
+                FieldCondition(key="doc_type", match=MatchAny(any=filters["doc_types"]))
+            )
 
     qdrant_filter = Filter(must=must) if must else None
 
@@ -148,7 +163,7 @@ def semantic_search(query: str, top_k: int = TOP_K, filters: Dict = None) -> Lis
     )
 
     docs = []
-    for hit in (res.points or []):
+    for hit in res.points or []:
         d = (hit.payload or {}).copy()
         d["_score"] = hit.score
         d["_source"] = "semantic"
@@ -156,7 +171,9 @@ def semantic_search(query: str, top_k: int = TOP_K, filters: Dict = None) -> Lis
     return docs
 
 
-def graph_expand(seed_sigs: List[str], depth: int = GRAPH_DEPTH) -> List[Tuple[str, str, float]]:
+def graph_expand(
+    seed_sigs: List[str], depth: int = GRAPH_DEPTH
+) -> List[Tuple[str, str, float]]:
     G = get_graph()
     if G is None:
         return []
@@ -166,7 +183,7 @@ def graph_expand(seed_sigs: List[str], depth: int = GRAPH_DEPTH) -> List[Tuple[s
     frontier = set(seed_sigs)
 
     for d in range(depth):
-        decay = 0.65 ** d
+        decay = 0.65**d
         new_frontier = set()
         for node in frontier:
             if node not in G:
@@ -181,8 +198,10 @@ def graph_expand(seed_sigs: List[str], depth: int = GRAPH_DEPTH) -> List[Tuple[s
             for nb in G.predecessors(node):
                 if nb in visited:
                     continue
-                if (G[nb][node].get("relation") == "CITES_UODO"
-                        and G.nodes.get(nb, {}).get("doc_type") == "uodo_decision"):
+                if (
+                    G[nb][node].get("relation") == "CITES_UODO"
+                    and G.nodes.get(nb, {}).get("doc_type") == "uodo_decision"
+                ):
                     result.append((nb, "cytuje tę decyzję", 0.5 * decay))
                     visited.add(nb)
                     new_frontier.add(nb)
@@ -198,11 +217,14 @@ def fetch_by_signature(sig: str) -> Optional[Dict]:
     client = get_qdrant()
     pts, _ = client.scroll(
         collection_name=COLLECTION_NAME,
-        scroll_filter=Filter(must=[
-            FieldCondition(key="signature", match=MatchValue(value=sig)),
-            FieldCondition(key="doc_type", match=MatchValue(value="uodo_decision")),
-        ]),
-        limit=1, with_payload=True,
+        scroll_filter=Filter(
+            must=[
+                FieldCondition(key="signature", match=MatchValue(value=sig)),
+                FieldCondition(key="doc_type", match=MatchValue(value="uodo_decision")),
+            ]
+        ),
+        limit=1,
+        with_payload=True,
     )
     if pts:
         d = (pts[0].payload or {}).copy()
@@ -218,14 +240,23 @@ def keyword_exact_search(keyword: str, filters: Dict = None) -> List[Dict]:
     must = [FieldCondition(key="keywords", match=MatchValue(value=keyword))]
     if filters:
         if filters.get("status"):
-            must.append(FieldCondition(key="status", match=MatchValue(value=filters["status"])))
+            must.append(
+                FieldCondition(key="status", match=MatchValue(value=filters["status"]))
+            )
         if filters.get("year_from") or filters.get("year_to"):
-            must.append(FieldCondition(key="year", range=Range(
-                gte=filters.get("year_from", 2000),
-                lte=filters.get("year_to", 2030),
-            )))
+            must.append(
+                FieldCondition(
+                    key="year",
+                    range=Range(
+                        gte=filters.get("year_from", 2000),
+                        lte=filters.get("year_to", 2030),
+                    ),
+                )
+            )
         if filters.get("doc_types"):
-            must.append(FieldCondition(key="doc_type", match=MatchAny(any=filters["doc_types"])))
+            must.append(
+                FieldCondition(key="doc_type", match=MatchAny(any=filters["doc_types"]))
+            )
 
     qdrant_filter = Filter(must=must)
     docs = []
@@ -238,7 +269,7 @@ def keyword_exact_search(keyword: str, filters: Dict = None) -> List[Dict]:
             offset=offset,
             with_payload=True,
         )
-        for pt in (pts or []):
+        for pt in pts or []:
             d = (pt.payload or {}).copy()
             d["_score"] = 1.0
             d["_source"] = "keyword"
@@ -257,11 +288,13 @@ def _get_all_tags() -> List[str]:
     offset = None
     while True:
         pts, next_offset = client.scroll(
-            collection_name=COLLECTION_NAME, limit=500,
-            with_payload=["keywords"], with_vectors=False,
+            collection_name=COLLECTION_NAME,
+            limit=500,
+            with_payload=["keywords"],
+            with_vectors=False,
             offset=offset,
         )
-        for pt in (pts or []):
+        for pt in pts or []:
             kws = (pt.payload or {}).get("keywords", [])
             if isinstance(kws, list):
                 all_tags.update(kws)
@@ -274,19 +307,21 @@ def _get_all_tags() -> List[str]:
 
 
 def _extract_tags_with_llm(query: str, available_tags: List[str]) -> List[str]:
-    """Pyta LLM o tagi pasujące do zapytania. Zwraca listę tagów."""
+    """Pyta LLM o tagi pasujące do zapytania.
+    Zwraca maks. 8 tagów z listy + maks. 2 nowe tagi spoza listy (oznaczone [NOWY])."""
     provider = st.session_state.get("llm_provider", DEFAULT_PROVIDER)
-    api_key  = st.session_state.get("llm_api_key", "")
-    model    = st.session_state.get("llm_model", "")
+    api_key = st.session_state.get("llm_api_key", "")
+    model = st.session_state.get("llm_model", "")
 
     tags_list = "\n".join(f"- {t}" for t in available_tags)
     prompt = (
         f"Masz listę tagów z bazy orzeczeń UODO (organ ochrony danych osobowych w Polsce).\n"
-        f"Wybierz tagi NAJBARDZIEJ pasujące do zapytania — maksymalnie 5 tagów.\n"
+        f"Wybierz tagi NAJBARDZIEJ pasujące do zapytania — maksymalnie 8 tagów z listy.\n"
+        f"Jeśli temat zapytania nie jest pokryty przez żaden istniejący tag, możesz dodać maksymalnie 4 NOWE tagi spoza listy.\n"
         f"Uwzględnij synonimy i formy fleksyjne (np. 'kampania wyborcza' → szukaj tagów o wyborach, partiach, polityce).\n"
-        f"Wybieraj tylko tagi ŚCIŚLE związane z tematem — nie wybieraj ogólnych tagów jak 'nałożenie kary' czy 'podstawy prawne' chyba że zapytanie wprost o nie pyta.\n"
-        f"Odpowiedz TYLKO listą tagów z poniższej listy, jeden na linię, bez komentarzy.\n"
-        f"Jeśli żaden tag nie pasuje — odpowiedz pustą linią.\n\n"
+        f"Wybieraj tylko tagi ŚCIŚLE związane z tematem — nie wybieraj zbyt ogólnych tagów, chyba że zapytanie wprost o nie pyta.\n"
+        f"Odpowiedz TYLKO listą tagów, jeden na linię, bez komentarzy.\n"
+        f"Tagi z listy — dokładna pisownia. Nowe tagi — z prefiksem [NOWY].\n"
         f"Zapytanie: {query}\n\n"
         f"Dostępne tagi:\n{tags_list}"
     )
@@ -294,30 +329,46 @@ def _extract_tags_with_llm(query: str, available_tags: List[str]) -> List[str]:
     try:
         if provider == "Groq":
             from groq import Groq
+
             client = Groq(api_key=api_key or GROQ_API_KEY)
             resp = client.chat.completions.create(
-                model=model, max_tokens=300, stream=False,
+                model=model,
+                max_tokens=400,
+                stream=False,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = resp.choices[0].message.content or ""
         else:
             import requests as _req
+
             resp = _req.post(
                 f"{OLLAMA_CLOUD_URL}/api/chat",
                 headers={"Authorization": f"Bearer {api_key or OLLAMA_CLOUD_API_KEY}"},
-                json={"model": model, "stream": False,
-                      "messages": [{"role": "user", "content": prompt}]},
+                json={
+                    "model": model,
+                    "stream": False,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
                 timeout=30,
             )
             raw = resp.json().get("message", {}).get("content", "")
 
-        found = []
         tags_lower = {t.lower(): t for t in available_tags}
+        existing_found = []
+        new_found = []
+
         for line in raw.strip().splitlines():
             line = line.strip().lstrip("- ").strip()
-            if line.lower() in tags_lower:
-                found.append(tags_lower[line.lower()])
-        return found
+            if not line:
+                continue
+            if line.startswith("[NOWY]"):
+                tag = line[6:].strip()
+                if tag and len(tag) > 2 and len(new_found) < 2:
+                    new_found.append(tag)
+            elif line.lower() in tags_lower and len(existing_found) < 8:
+                existing_found.append(tags_lower[line.lower()])
+
+        return existing_found + new_found
     except Exception:
         return []
 
@@ -356,8 +407,9 @@ def _doc_key(d: Dict) -> str:
     return sig or f"{dtype}:{art}"
 
 
-def hybrid_search(query: str, top_k: int = TOP_K,
-                  filters: Dict = None, use_graph: bool = True):
+def hybrid_search(
+    query: str, top_k: int = TOP_K, filters: Dict = None, use_graph: bool = True
+):
     """Zwraca (List[Dict], List[str]) — dokumenty i użyte tagi."""
     matched_tags = _get_matched_tags(query)
 
@@ -390,12 +442,17 @@ def hybrid_search(query: str, top_k: int = TOP_K,
 
     # Graf rozszerza tylko orzeczenia UODO
     seed_sigs = [
-        d.get("signature", "") for d in merged
+        d.get("signature", "")
+        for d in merged
         if d.get("doc_type") == "uodo_decision" and d.get("signature")
     ]
     if seed_sigs:
         expanded = graph_expand(seed_sigs)
-        seen_graph = {d.get("signature", "") for d in merged if d.get("doc_type") == "uodo_decision"}
+        seen_graph = {
+            d.get("signature", "")
+            for d in merged
+            if d.get("doc_type") == "uodo_decision"
+        }
         for sig, rel_type, score in expanded:
             if sig in seen_graph:
                 continue
@@ -411,23 +468,46 @@ def hybrid_search(query: str, top_k: int = TOP_K,
 
 # ─────────────────────────── LLM ─────────────────────────────────
 
+
 def _extract_fragment(content: str, query: str, max_len: int = 1200) -> str:
     if not content or len(content) <= max_len:
         return content
-    stopwords = {"jakie", "są", "w", "o", "i", "z", "do", "na", "co", "ile",
-                 "jak", "czy", "przez", "dla", "po", "przy", "od", "ze", "to"}
-    keywords = [w.lower() for w in re.split(r'\W+', query)
-                if w.lower() not in stopwords and len(w) > 2]
+    stopwords = {
+        "jakie",
+        "są",
+        "w",
+        "o",
+        "i",
+        "z",
+        "do",
+        "na",
+        "co",
+        "ile",
+        "jak",
+        "czy",
+        "przez",
+        "dla",
+        "po",
+        "przy",
+        "od",
+        "ze",
+        "to",
+    }
+    keywords = [
+        w.lower()
+        for w in re.split(r"\W+", query)
+        if w.lower() not in stopwords and len(w) > 2
+    ]
     if not keywords:
         return content[:max_len]
     step = 300
     best_score, best_pos = -1, 0
     cl = content.lower()
     for pos in range(0, max(1, len(content) - max_len), step):
-        score = sum(cl[pos:pos + max_len].count(kw) for kw in keywords)
+        score = sum(cl[pos : pos + max_len].count(kw) for kw in keywords)
         if score > best_score:
             best_score, best_pos = score, pos
-    fragment = content[best_pos:best_pos + max_len]
+    fragment = content[best_pos : best_pos + max_len]
     if best_pos > 0:
         nl = fragment.find("\n")
         if 0 < nl < 150:
@@ -455,7 +535,7 @@ def build_context(docs: List[Dict], query: str, max_chars: int = 14000) -> str:
             text = doc.get("content_text", "")
             label = f"Art. {art_num}"
             if total > 1:
-                label += f" (część {chunk_idx+1}/{total})"
+                label += f" (część {chunk_idx + 1}/{total})"
             block = (
                 f"[{i}] USTAWA o ochronie danych osobowych — {label}\n"
                 f"Źródło: Dz.U. 2019 poz. 1781 (u.o.d.o.)\n"
@@ -474,7 +554,9 @@ def build_context(docs: List[Dict], query: str, max_chars: int = 14000) -> str:
             sig = doc.get("signature", "?")
             date = doc.get("date_issued", "")[:7]
             status = doc.get("status", "")
-            keywords = doc.get("keywords_text", "") or ", ".join(doc.get("keywords", []))
+            keywords = doc.get("keywords_text", "") or ", ".join(
+                doc.get("keywords", [])
+            )
             fragment = _extract_fragment(doc.get("content_text", ""), query)
             acts = doc.get("related_acts", [])[:4]
             eu = doc.get("related_eu_acts", [])[:2]
@@ -504,10 +586,12 @@ def get_available_models(provider: str, api_key: str = None) -> List[str]:
     if provider == "Groq":
         try:
             from groq import Groq
+
             client = Groq(api_key=api_key or GROQ_API_KEY)
             models_resp = client.models.list()
             ids = sorted(
-                m.id for m in models_resp.data
+                m.id
+                for m in models_resp.data
                 if not any(x in m.id for x in ("whisper", "tts", "playai", "distil"))
             )
             return ids or ["llama-3.3-70b-versatile"]
@@ -518,6 +602,7 @@ def get_available_models(provider: str, api_key: str = None) -> List[str]:
     # Ollama Cloud
     try:
         import requests as _req
+
         r = _req.get(
             f"{OLLAMA_CLOUD_URL}/api/tags",
             headers={"Authorization": f"Bearer {api_key or OLLAMA_CLOUD_API_KEY}"},
@@ -531,8 +616,13 @@ def get_available_models(provider: str, api_key: str = None) -> List[str]:
         return ["qwen3:14b", "llama3.3:70b", "bielik:11b-v3"]
 
 
-def call_llm_stream(query: str, context: str, provider: str = None,
-                    model: str = None, api_key: str = None):
+def call_llm_stream(
+    query: str,
+    context: str,
+    provider: str = None,
+    model: str = None,
+    api_key: str = None,
+):
     """Stream odpowiedzi z Groq lub Ollama Cloud."""
     system = (
         "Jesteś ekspertem ds. ochrony danych osobowych i prawa RODO. "
@@ -543,32 +633,40 @@ def call_llm_stream(query: str, context: str, provider: str = None,
         "Jeśli kontekst nie zawiera odpowiedzi na pytanie, powiedz o tym wprost."
     )
     user = f"Pytanie: {query}\n\nDokumenty:\n{context}"
-    messages = [{"role": "system", "content": system},
-                {"role": "user",   "content": user}]
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
 
     provider = provider or st.session_state.get("llm_provider", DEFAULT_PROVIDER)
-    model    = model    or st.session_state.get("llm_model", "")
-    api_key  = api_key  or st.session_state.get("llm_api_key", "")
+    model = model or st.session_state.get("llm_model", "")
+    api_key = api_key or st.session_state.get("llm_api_key", "")
 
     if provider == "Groq":
         from groq import Groq
+
         client = Groq(api_key=api_key or GROQ_API_KEY)
         for chunk in client.chat.completions.create(
-            model=model, messages=messages,
-            max_tokens=2048, stream=True,
+            model=model,
+            messages=messages,
+            max_tokens=2048,
+            stream=True,
         ):
             delta = chunk.choices[0].delta.content
             if delta:
                 yield delta
 
     elif provider == "Ollama Cloud":
-        import requests as _req
         import json as _json
+
+        import requests as _req
+
         resp = _req.post(
             f"{OLLAMA_CLOUD_URL}/api/chat",
             headers={"Authorization": f"Bearer {api_key or OLLAMA_CLOUD_API_KEY}"},
             json={"model": model, "messages": messages, "stream": True},
-            stream=True, timeout=120,
+            stream=True,
+            timeout=120,
         )
         for line in resp.iter_lines():
             if line:
@@ -587,6 +685,7 @@ def call_llm_stream(query: str, context: str, provider: str = None,
 
 # ─────────────────────────── STATYSTYKI ──────────────────────────
 
+
 @st.cache_data(ttl=3600)
 def get_collection_stats() -> Dict:
     client = get_qdrant()
@@ -598,8 +697,11 @@ def get_collection_stats() -> Dict:
     offset = None
     while True:
         pts, next_off = client.scroll(
-            collection_name=COLLECTION_NAME, limit=500, offset=offset,
-            with_payload=["doc_type"], with_vectors=False,
+            collection_name=COLLECTION_NAME,
+            limit=500,
+            offset=offset,
+            with_payload=["doc_type"],
+            with_vectors=False,
         )
         for p in pts:
             dtype = (p.payload or {}).get("doc_type", "")
@@ -614,9 +716,13 @@ def get_collection_stats() -> Dict:
     G = get_graph()
     graph_stats = {}
     if G:
-        uodo = [n for n, d in G.nodes(data=True) if d.get("doc_type") == "uodo_decision"]
-        most_cited = sorted([(n, G.in_degree(n)) for n in uodo if G.in_degree(n) > 0],
-                            key=lambda x: -x[1])[:5]
+        uodo = [
+            n for n, d in G.nodes(data=True) if d.get("doc_type") == "uodo_decision"
+        ]
+        most_cited = sorted(
+            [(n, G.in_degree(n)) for n in uodo if G.in_degree(n) > 0],
+            key=lambda x: -x[1],
+        )[:5]
         graph_stats = {
             "edges": G.number_of_edges(),
             "most_cited": most_cited,
@@ -631,6 +737,7 @@ def get_collection_stats() -> Dict:
 
 
 # ─────────────────────────── KARTY WYNIKÓW ───────────────────────
+
 
 def decision_url(doc: Dict) -> str:
     sig = doc.get("signature", "")
@@ -692,7 +799,9 @@ def render_decision_card(doc: Dict, rank: int):
     with st.container():
         col1, col2 = st.columns([5, 1])
         with col1:
-            st.markdown(f"**{rank}. [{sig}]({decision_url(doc)})** {status_icon} {status}")
+            st.markdown(
+                f"**{rank}. [{sig}]({decision_url(doc)})** {status_icon} {status}"
+            )
             if graph_rel:
                 st.caption(f"↗ powiązana przez graf: *{graph_rel}*")
         with col2:
@@ -774,6 +883,7 @@ def render_card(doc: Dict, rank: int):
 
 # ─────────────────────────── GŁÓWNA APLIKACJA ────────────────────
 
+
 def main():
     st.set_page_config(
         page_title="UODO RAG — Wyszukiwarka Decyzji i Przepisów",
@@ -782,7 +892,8 @@ def main():
         initial_sidebar_state="expanded",
     )
 
-    st.markdown("""
+    st.markdown(
+        """
     <style>
         .main-header { font-size: 2rem; font-weight: 700; color: #1a365d; margin-bottom: 0; }
         .sub-header { color: #4a5568; font-size: 0.95rem; margin-bottom: 1.5rem; }
@@ -790,12 +901,14 @@ def main():
                       padding: 1rem 1.2rem; border-radius: 6px; margin: 1rem 0; }
         div[data-testid="stExpander"] { border: 1px solid #e2e8f0; border-radius: 6px; }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="main-header">🔐 UODO RAG</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="sub-header">Wyszukiwarka decyzji Prezesa UODO i przepisów ustawy '
-        'o ochronie danych osobowych · Graf powiązań · Analiza AI</div>',
+        "o ochronie danych osobowych · Graf powiązań · Analiza AI</div>",
         unsafe_allow_html=True,
     )
 
@@ -804,8 +917,9 @@ def main():
         st.markdown("## ⚙️ Opcje")
 
         st.markdown("### 🤖 Model AI")
-        provider = st.selectbox("Provider", PROVIDERS,
-                                index=PROVIDERS.index(DEFAULT_PROVIDER))
+        provider = st.selectbox(
+            "Provider", PROVIDERS, index=PROVIDERS.index(DEFAULT_PROVIDER)
+        )
 
         if provider == "Groq":
             _key_env = GROQ_API_KEY
@@ -823,16 +937,15 @@ def main():
             api_key = st.text_input(_key_label, type="password")
 
         models = get_available_models(provider, api_key)
-        default_model = DEFAULT_OLLAMA_MODEL if provider == "Ollama Cloud" else DEFAULT_GROQ_MODEL
-        default_idx = next(
-            (i for i, m in enumerate(models) if default_model in m),
-            0
+        default_model = (
+            DEFAULT_OLLAMA_MODEL if provider == "Ollama Cloud" else DEFAULT_GROQ_MODEL
         )
+        default_idx = next((i for i, m in enumerate(models) if default_model in m), 0)
         selected_model = st.selectbox("Model", models, index=default_idx)
 
         st.session_state["llm_provider"] = provider
-        st.session_state["llm_model"]    = selected_model
-        st.session_state["llm_api_key"]  = api_key
+        st.session_state["llm_model"] = selected_model
+        st.session_state["llm_api_key"] = api_key
 
         st.markdown("---")
 
@@ -879,7 +992,12 @@ def main():
     if show_gdpr:
         doc_types.extend(["gdpr_article", "gdpr_recital"])
     if not doc_types:
-        doc_types = ["uodo_decision", "legal_act_article", "gdpr_article", "gdpr_recital"]
+        doc_types = [
+            "uodo_decision",
+            "legal_act_article",
+            "gdpr_article",
+            "gdpr_recital",
+        ]
 
     filters = {"doc_types": doc_types}
     if status_filter != "— wszystkie —":
@@ -913,17 +1031,22 @@ def main():
             ("🤝", "Umowa powierzenia przetwarzania danych"),
             ("🕵️", "Inspektor ochrony danych — konflikt interesów"),
             ("📸", "Zdjęcie tablicy rejestracyjnej w internecie a RODO"),
+            ("📜", "DKN.5131.15.2025"),
         ]
         cols = st.columns(2)
         for idx, (emoji, question) in enumerate(examples):
             col = cols[idx % 2]
-            if col.button(f"{emoji} {question}", key=f"example_{idx}",
-                           use_container_width=True):
+            if col.button(
+                f"{emoji} {question}", key=f"example_{idx}", use_container_width=True
+            ):
                 st.session_state["_example_query"] = question
                 st.rerun()
 
-    if query and (search_btn or st.session_state.get("last_query") != query
-                  or st.session_state.get("last_filters") != str(filters)):
+    if query and (
+        search_btn
+        or st.session_state.get("last_query") != query
+        or st.session_state.get("last_filters") != str(filters)
+    ):
         st.session_state["last_query"] = query
         st.session_state["last_filters"] = str(filters)
 
@@ -946,29 +1069,42 @@ def main():
                                 rdoc["_score"] = 0.9
                                 docs.append(rdoc)
                 else:
-                    st.warning(f"Nie znaleziono decyzji o sygnaturze **{sig_norm}** w bazie.")
-                    docs, _tags = hybrid_search(query, top_k=TOP_K, filters=filters, use_graph=use_graph)
+                    st.warning(
+                        f"Nie znaleziono decyzji o sygnaturze **{sig_norm}** w bazie."
+                    )
+                    docs, _tags = hybrid_search(
+                        query, top_k=TOP_K, filters=filters, use_graph=use_graph
+                    )
             else:
-                docs, _tags = hybrid_search(query, top_k=TOP_K, filters=filters, use_graph=use_graph)
+                docs, _tags = hybrid_search(
+                    query, top_k=TOP_K, filters=filters, use_graph=use_graph
+                )
             search_time = time.time() - t0
 
         if not docs:
-            st.warning("Nie znaleziono dokumentów. Spróbuj zmienić filtry lub sformułowanie.")
+            st.warning(
+                "Nie znaleziono dokumentów. Spróbuj zmienić filtry lub sformułowanie."
+            )
             return
 
-        decisions  = [d for d in docs if d.get("doc_type") == "uodo_decision"]
-        act_arts   = [d for d in docs if d.get("doc_type") == "legal_act_article"]
-        gdpr_docs  = [d for d in docs if d.get("doc_type") in ("gdpr_article", "gdpr_recital")]
+        decisions = [d for d in docs if d.get("doc_type") == "uodo_decision"]
+        act_arts = [d for d in docs if d.get("doc_type") == "legal_act_article"]
+        gdpr_docs = [
+            d for d in docs if d.get("doc_type") in ("gdpr_article", "gdpr_recital")
+        ]
         graph_docs = [d for d in docs if d.get("_source") == "graph"]
 
         _tag_info = f" · tag: `{kw_filter}`" if kw_filter.strip() else ""
         st.caption(
             f"Znaleziono {len(docs)} dokumentów "
             f"({len(decisions)} decyzji, {len(act_arts)} u.o.d.o., "
-            f"{len(gdpr_docs)} RODO, {len(graph_docs)} przez graf) · {search_time:.2f}s" + _tag_info
+            f"{len(gdpr_docs)} RODO, {len(graph_docs)} przez graf) · {search_time:.2f}s"
+            + _tag_info
         )
         if _tags:
-            st.caption("🏷️ Tagi użyte do wyszukiwania: " + " · ".join(f"`{t}`" for t in _tags))
+            st.caption(
+                "🏷️ Tagi użyte do wyszukiwania: " + " · ".join(f"`{t}`" for t in _tags)
+            )
 
         if use_llm:
             context = build_context(docs, query)
@@ -986,13 +1122,15 @@ def main():
                 st.error(f"Błąd LLM: {e}")
 
         st.markdown(f"### 📋 Dokumenty ({len(docs)})")
-        tabs = st.tabs([
-            f"Wszystkie ({len(docs)})",
-            f"Decyzje UODO ({len(decisions)})",
-            f"Ustawa u.o.d.o. ({len(act_arts)})",
-            f"RODO ({len(gdpr_docs)})",
-            f"Graf ({len(graph_docs)})",
-        ])
+        tabs = st.tabs(
+            [
+                f"Wszystkie ({len(docs)})",
+                f"Decyzje UODO ({len(decisions)})",
+                f"Ustawa u.o.d.o. ({len(act_arts)})",
+                f"RODO ({len(gdpr_docs)})",
+                f"Graf ({len(graph_docs)})",
+            ]
+        )
 
         with tabs[0]:
             for i, doc in enumerate(docs, 1):
