@@ -381,13 +381,28 @@ def _keyword_search_from_query(query: str, filters: Dict = None) -> List[Dict]:
     return all_docs
 
 
+def _doc_key(d: Dict) -> str:
+    """Unikalny klucz dokumentu do deduplikacji."""
+    # Dla artykułów ustawy i RODO użyj doc_id lub kombinacji pól
+    doc_id = d.get("doc_id", "")
+    if doc_id:
+        return doc_id
+    sig = d.get("signature", "")
+    dtype = d.get("doc_type", "")
+    art = d.get("article_num", "")
+    chunk = d.get("chunk_index", 0)
+    if dtype in ("legal_act_article", "gdpr_article", "gdpr_recital"):
+        return f"{dtype}:{sig}:{art}:{chunk}"
+    return sig or f"{dtype}:{art}"
+
+
 def hybrid_search(
     query: str, top_k: int = TOP_K, filters: Dict = None, use_graph: bool = True
 ):
     """Zwraca (List[Dict], List[str]) — dokumenty i użyte tagi."""
     matched_tags = _get_matched_tags(query)
 
-    seen_sigs = set()
+    seen_keys = set()
     merged = []
 
     if matched_tags:
@@ -396,18 +411,18 @@ def hybrid_search(
             tag_filters = (filters or {}).copy()
             tag_filters["keyword"] = tag
             for d in semantic_search(query, top_k=top_k, filters=tag_filters):
-                key = d.get("signature", "") or d.get("article_num", "")
-                if key not in seen_sigs:
+                key = _doc_key(d)
+                if key not in seen_keys:
                     merged.append(d)
-                    seen_sigs.add(key)
+                    seen_keys.add(key)
         merged.sort(key=lambda d: -d.get("_score", 0))
 
     # Zawsze dołącz semantic bez filtra (trafne ale bez tagu)
     for d in semantic_search(query, top_k=top_k, filters=filters):
-        key = d.get("signature", "") or d.get("article_num", "")
-        if key not in seen_sigs:
+        key = _doc_key(d)
+        if key not in seen_keys:
             merged.append(d)
-            seen_sigs.add(key)
+            seen_keys.add(key)
 
     if not use_graph or not merged:
         return merged, matched_tags
@@ -420,16 +435,20 @@ def hybrid_search(
     ]
     if seed_sigs:
         expanded = graph_expand(seed_sigs)
-        seen = {d.get("signature", "") for d in merged}
+        seen_graph = {
+            d.get("signature", "")
+            for d in merged
+            if d.get("doc_type") == "uodo_decision"
+        }
         for sig, rel_type, score in expanded:
-            if sig in seen:
+            if sig in seen_graph:
                 continue
             doc = fetch_by_signature(sig)
             if doc:
                 doc["_score"] = score
                 doc["_graph_relation"] = rel_type
                 merged.append(doc)
-                seen.add(sig)
+                seen_graph.add(sig)
 
     return merged, matched_tags
 
