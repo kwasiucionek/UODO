@@ -2,14 +2,17 @@
 
 Aplikacja RAG (Retrieval-Augmented Generation) do przeszukiwania decyzji Prezesa Urzędu Ochrony Danych Osobowych oraz przepisów ustawy o ochronie danych osobowych i rozporządzenia RODO.
 
+Wygląd i filtry wzorowane na oficjalnym [Portalu Orzeczeń UODO](https://orzeczenia.uodo.gov.pl).
+
 ## Funkcje
 
 - **Wyszukiwanie semantyczne** — model embeddingowy rozumie sens pytania, nie tylko słowa kluczowe
 - **Graf powiązań** — decyzje UODO połączone siecią cytowań; wyszukiwanie rozszerza wyniki o powiązane orzeczenia
-- **Analiza AI** — LLM syntetyzuje odpowiedź z konkretnymi odniesieniami do sygnatur i artykułów ustawy
+- **Analiza AI** — LLM syntetyzuje odpowiedź z konkretnymi odniesieniami do sygnatur i artykułów ustawy; uwzględnia aktywne filtry
 - **Wyszukiwanie po tagach** — LLM automatycznie dobiera pasujące słowa kluczowe z bazy, obsługuje formy fleksyjne
 - **Fast path po sygnaturze** — wpisanie sygnatury (np. `DKN.5110.16.2022`) trafia bezpośrednio do decyzji
 - **Trzy typy dokumentów** — decyzje UODO + ustawa o ochronie danych osobowych + RODO (artykuły i motywy)
+- **Filtry taksonomiczne** — rodzaj decyzji, rodzaj naruszenia, podstawa prawna, środek naprawczy, sektor (zgodne z taksonomią portalu UODO)
 
 ## Architektura
 
@@ -20,9 +23,12 @@ zapytanie użytkownika
         │
         ├─► Semantic search (mmlw-retrieval-roberta-large)
         │
+        ├─► Filtry taksonomiczne (Qdrant payload filters)
+        │
         ├─► Graf cytowań (NetworkX) → rozszerzenie o powiązane decyzje
         │
         └─► LLM (Ollama Cloud / Groq) → odpowiedź z odniesieniami
+                (kontekst zawiera aktywne filtry)
 ```
 
 ## Baza dokumentów
@@ -73,8 +79,11 @@ EMBED_MODEL=sdadas/mmlw-retrieval-roberta-large
 # Pobierz decyzje z API portalu orzeczeń
 python uodo_scraper.py --output uodo_decisions.jsonl
 
+# Wzbogać o pola taksonomiczne (rodzaj decyzji, naruszenie, sektor itd.)
+python enrich_jsonl_taxonomy.py --input uodo_decisions.jsonl --output uodo_decisions_enriched.jsonl
+
 # Zaindeksuj w Qdrant
-python uodo_indexer.py --jsonl uodo_decisions.jsonl
+python uodo_indexer.py --jsonl uodo_decisions_enriched.jsonl --rebuild
 ```
 
 ### 2. Ustawa o ochronie danych osobowych
@@ -110,14 +119,17 @@ Aplikacja dostępna pod adresem: http://localhost:8501
 
 ```
 .
-├── uodo_app.py          # Główna aplikacja Streamlit
-├── uodo_scraper.py      # Scraper decyzji z API portalu UODO
-├── uodo_indexer.py      # Indeksowanie decyzji w Qdrant
-├── uodo_act_indexer.py  # Indeksowanie ustawy o ochronie danych
-├── rodo_indexer.py      # Indeksowanie RODO (2016/679) z EUR-Lex
-├── requirements.txt     # Zależności Python
-├── .env                 # Klucze API (nie commitować!)
-└── uodo_graph.pkl       # Graf powiązań (generowany automatycznie)
+├── uodo_app.py                  # Główna aplikacja Streamlit
+├── uodo_scraper.py              # Scraper decyzji z API portalu UODO
+├── uodo_indexer.py              # Indeksowanie decyzji w Qdrant
+├── uodo_act_indexer.py          # Indeksowanie ustawy o ochronie danych
+├── rodo_indexer.py              # Indeksowanie RODO (2016/679) z EUR-Lex
+├── enrich_jsonl_taxonomy.py     # Wzbogacenie JSONL o pola taksonomiczne
+├── enrich_act_keywords.py       # Generowanie słów kluczowych dla artykułów (LLM)
+├── requirements.txt             # Zależności Python
+├── .env                         # Klucze API (nie commitować!)
+├── .gitignore
+└── uodo_graph.pkl               # Graf powiązań (generowany automatycznie)
 ```
 
 ## Model embeddingowy
@@ -130,3 +142,15 @@ Aplikacja wykorzystuje **[sdadas/mmlw-retrieval-roberta-large](https://huggingfa
 |---|---|---|
 | Ollama Cloud | `gpt-oss:120b` | Domyślny, najlepsza jakość |
 | Groq | `openai/gpt-oss-120b` | Szybki, darmowy limit |
+
+## Filtry taksonomiczne
+
+Filtry dostępne wyłącznie dla decyzji UODO (ignorowane przy wyszukiwaniu w u.o.d.o. i RODO):
+
+| Filtr | Opis |
+|---|---|
+| Rodzaj decyzji | nakaz, odmowa, umorzenie, upomnienie, nałożenie kary, … |
+| Rodzaj naruszenia | brak podstawy prawnej, niezgłoszenie naruszenia, brak IOD, … |
+| Podstawa prawna | zgoda, umowa, obowiązek prawny, uzasadniony interes, … |
+| Środek naprawczy | ostrzeżenie, nakaz spełnienia żądania, kara pieniężna, … |
+| Sektor | marketing, zdrowie, szkolnictwo, finanse, telekomunikacja, … |
