@@ -150,6 +150,11 @@ def semantic_search(query: str, top_k: int = TOP_K, filters: Dict = None) -> Lis
             must.append(
                 FieldCondition(key="doc_type", match=MatchAny(any=filters["doc_types"]))
             )
+        for term_field in ("term_decision_type", "term_violation_type",
+                           "term_legal_basis", "term_corrective_measure", "term_sector"):
+            vals = filters.get(term_field, [])
+            if vals:
+                must.append(FieldCondition(key=term_field, match=MatchAny(any=vals)))
 
     qdrant_filter = Filter(must=must) if must else None
 
@@ -281,6 +286,44 @@ def keyword_exact_search(keyword: str, filters: Dict = None) -> List[Dict]:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600)
+def _get_taxonomy_options() -> Dict[str, List[str]]:
+    """Pobiera unikalne wartości pól taksonomii z Qdrant."""
+    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    client = get_qdrant()
+    result = {
+        "term_decision_type": [],
+        "term_violation_type": [],
+        "term_legal_basis": [],
+        "term_corrective_measure": [],
+        "term_sector": [],
+    }
+    try:
+        offset = None
+        while True:
+            pts, next_off = client.scroll(
+                collection_name=COLLECTION_NAME, limit=500, offset=offset,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="doc_type", match=MatchValue(value="uodo_decision"))
+                ]),
+                with_payload=list(result.keys()), with_vectors=False,
+            )
+            for pt in (pts or []):
+                pay = pt.payload or {}
+                for field in result:
+                    for val in (pay.get(field) or []):
+                        if val and val not in result[field]:
+                            result[field].append(val)
+            if not next_off or not pts:
+                break
+            offset = next_off
+        for field in result:
+            result[field] = sorted(result[field])
+    except Exception:
+        pass
+    return result
+
+
 def _get_all_tags() -> List[str]:
     """Pobiera wszystkie unikalne tagi z kolekcji (cache 5 min)."""
     client = get_qdrant()
@@ -516,10 +559,38 @@ def _extract_fragment(content: str, query: str, max_len: int = 1200) -> str:
     return fragment
 
 
-def build_context(docs: List[Dict], query: str, max_chars: int = 14000) -> str:
+def build_context(docs: List[Dict], query: str, max_chars: int = 14000,
+                  filters: Dict = None) -> str:
+    # Opisz aktywne filtry słownie
+    filter_lines = []
+    f = filters or {}
+    if f.get("status"):
+        filter_lines.append(f"Status decyzji: {f['status']}")
+    if f.get("term_decision_type"):
+        filter_lines.append(f"Rodzaj decyzji: {', '.join(f['term_decision_type'])}")
+    if f.get("term_violation_type"):
+        filter_lines.append(f"Rodzaj naruszenia: {', '.join(f['term_violation_type'])}")
+    if f.get("term_legal_basis"):
+        filter_lines.append(f"Podstawa prawna: {', '.join(f['term_legal_basis'])}")
+    if f.get("term_corrective_measure"):
+        filter_lines.append(f"Środek naprawczy: {', '.join(f['term_corrective_measure'])}")
+    if f.get("term_sector"):
+        filter_lines.append(f"Sektor: {', '.join(f['term_sector'])}")
+    if f.get("keyword"):
+        filter_lines.append(f"Słowo kluczowe: {f['keyword']}")
+
+    filter_note = ""
+    if filter_lines:
+        filter_note = (
+            "UWAGA: Wyniki zostały zawężone przez użytkownika za pomocą filtrów:\n"
+            + "\n".join(f"  • {l}" for l in filter_lines)
+            + "\nOdpowiadaj z uwzględnieniem tego kontekstu filtrowania.\n"
+        )
+
     parts = [
         f"Poniżej znajdują się dokumenty powiązane z pytaniem: «{query}»\n"
         f"Zbiór zawiera DECYZJE UODO oraz ARTYKUŁY ustawy o ochronie danych osobowych.\n"
+        f"{filter_note}"
         f"Odpowiadaj WYŁĄCZNIE na podstawie poniższych dokumentów. "
         f"Podawaj sygnatury decyzji [DKN.XXXX] i numery artykułów [Art. X u.o.d.o.].\n"
     ]
@@ -756,118 +827,148 @@ def render_act_article_card(doc: Dict, rank: int):
     chunk_idx = doc.get("chunk_index", 0)
     total = doc.get("chunk_total", 1)
     score = doc.get("_score", 0)
-    text = doc.get("content_text", "")
+    text = doc.get("content_text", "")[:600]
 
     label = f"Art. {art_num} u.o.d.o."
     if total > 1:
         label += f" (część {chunk_idx + 1}/{total})"
 
-    with st.container():
-        col1, col2 = st.columns([5, 1])
-        with col1:
-            st.markdown(
-                f"**{rank}. 📗 [{label}]({ISAP_ACT_URL})** "
-                f"— Ustawa o ochronie danych osobowych"
-            )
-        with col2:
-            st.caption("📖 ustawa")
-            st.caption(f"score: {score:.3f}")
-
-        st.caption("📅 Dz.U. 2019 poz. 1781 · tekst jednolity z 30 sierpnia 2019 r.")
-
-        with st.expander("📄 Treść artykułu", expanded=True):
-            st.markdown(f"<small>{text}</small>", unsafe_allow_html=True)
-
-        st.divider()
+    html = f"""
+    <article class="doc-list-item">
+      <header>
+        <a href="{ISAP_ACT_URL}" target="_blank">{label}</a>
+        <span><small>Ustawa o ochronie danych osobowych</small></span>
+      </header>
+      <main>
+        <h2><a href="{ISAP_ACT_URL}" target="_blank">Dz.U. 2019 poz. 1781</a>
+          <span class="status-badge status-final ms-2">u.o.d.o.</span>
+        </h2>
+        <p>{text}{'…' if len(doc.get('content_text',''))>600 else ''}</p>
+      </main>
+      <footer>
+        <small class="text-muted">score: {score:.3f}</small>
+      </footer>
+    </article>"""
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def render_decision_card(doc: Dict, rank: int):
     """Karta dla decyzji UODO."""
-    sig = doc.get("signature", "?")
-    status = doc.get("status", "")
-    date = doc.get("date_issued", "")
-    score = doc.get("_score", 0)
-    source = doc.get("_source", "")
+    sig       = doc.get("signature", "?")
+    status    = doc.get("status", "")
+    date      = doc.get("date_published", "") or doc.get("date_issued", "")
+    score     = doc.get("_score", 0)
+    source    = doc.get("_source", "")
     graph_rel = doc.get("_graph_relation", "")
+    title     = doc.get("title_full", "") or doc.get("title", "")
+    name      = doc.get("title", sig)
+    url       = decision_url(doc)
+
     kw_list = doc.get("keywords", [])
     if isinstance(kw_list, str):
         kw_list = [k.strip() for k in kw_list.split(",") if k.strip()]
 
-    status_icon = {"prawomocna": "🟢", "nieprawomocna": "🟡"}.get(status, "⚪")
-    source_badge = "📊 graf" if source == "graph" else "🔍 semantic"
+    kinds   = doc.get("term_decision_type", [])
+    sectors = doc.get("term_sector", [])
 
+    # Usuń z keywords to, co już wyświetlamy jako kinds/sectors (unikamy duplikatów)
+    taxonomy_values = {v.lower() for v in kinds + sectors}
+    kw_list = [k for k in kw_list if k.lower() not in taxonomy_values]
+
+    status_cls = {
+        "prawomocna":    "status-final",
+        "nieprawomocna": "status-nonfinal",
+        "uchylona":      "status-repealed",
+    }.get(status, "status-unknown")
+
+    date_fmt = ""
+    if date:
+        try:
+            from datetime import datetime
+            d = datetime.strptime(date[:10], "%Y-%m-%d")
+            months = ["stycznia","lutego","marca","kwietnia","maja","czerwca",
+                      "lipca","sierpnia","września","października","listopada","grudnia"]
+            date_fmt = f"{d.day} {months[d.month-1]} {d.year}"
+        except Exception:
+            date_fmt = date[:10]
+
+    graph_badge = ""
+    if source == "graph":
+        graph_badge = f' <span class="status-badge status-unknown">↗ {graph_rel or "graf"}</span>'
+
+    # ── Nagłówek karty (HTML — styl portalu)
+    st.markdown(f"""
+    <article class="doc-list-item">
+      <header>
+        <a href="{url}" target="_blank">{sig}</a>
+        <time><small>opublikowano</small> {date_fmt}</time>
+      </header>
+      <main>
+        <h2 class="d-flex justify-content-between align-items-start gap-2">
+          <a href="{url}" target="_blank">{name}</a>
+          <span class="status-badge {status_cls}">{status.upper()}{graph_badge}</span>
+        </h2>
+        <p class="text-muted">{title[:280] + '…' if len(title) > 280 else title}</p>
+      </main>
+    </article>""", unsafe_allow_html=True)
+
+    # ── Footer karty — Streamlit (żeby markdown działał poprawnie)
     with st.container():
-        col1, col2 = st.columns([5, 1])
-        with col1:
-            st.markdown(
-                f"**{rank}. [{sig}]({decision_url(doc)})** {status_icon} {status}"
-            )
-            if graph_rel:
-                st.caption(f"↗ powiązana przez graf: *{graph_rel}*")
-        with col2:
-            st.caption(source_badge)
-            st.caption(f"score: {score:.3f}")
-
-        meta_cols = st.columns(3)
-        with meta_cols[0]:
-            st.caption(f"📅 {date[:10] if date else '—'}")
-        with meta_cols[1]:
-            acts = doc.get("related_acts", [])
-            if acts:
-                st.caption(f"📜 {len(acts)} aktów")
-        with meta_cols[2]:
-            courts = doc.get("related_court_rulings", [])
-            if courts:
-                st.caption(f"⚖️ {len(courts)} wyroków")
-
+        # Słowa kluczowe
         if kw_list:
-            tags = " · ".join(f"`{k}`" for k in kw_list[:8])
-            suffix = f" *+{len(kw_list) - 8} więcej*" if len(kw_list) > 8 else ""
+            shown = kw_list[:8]
+            rest  = len(kw_list) - len(shown)
+            tags  = " · ".join(f"`{k}`" for k in shown)
+            suffix = f" *+{rest} więcej*" if rest > 0 else ""
             st.caption(f"🏷️ {tags}{suffix}")
 
-        content = doc.get("content_text", "")
-        if content:
-            with st.expander("📄 Fragment treści", expanded=False):
-                st.markdown(f"<small>{content[:800]}…</small>", unsafe_allow_html=True)
-
+        # Powołane akty
         all_acts = doc.get("related_acts", [])[:4] + doc.get("related_eu_acts", [])[:2]
         if all_acts:
-            st.caption("Powołane akty: " + " · ".join(f"`{a}`" for a in all_acts))
+            st.caption("📜 Powołane akty: " + " · ".join(f"`{a}`" for a in all_acts))
 
-        st.divider()
+        if graph_rel:
+            st.caption(f"↗ powiązana przez graf: *{graph_rel}*")
+
+    st.divider()
 
 
 def render_gdpr_card(doc: Dict, rank: int):
     """Karta dla artykułu lub motywy RODO."""
-    art_num = doc.get("article_num", "?")
-    chunk_idx = doc.get("chunk_index", 0)
-    total = doc.get("chunk_total", 1)
-    score = doc.get("_score", 0)
-    text = doc.get("content_text", "")
-    dtype = doc.get("doc_type", "")
-    chapter = doc.get("chapter", "")
+    art_num       = doc.get("article_num", "?")
+    chunk_idx     = doc.get("chunk_index", 0)
+    total         = doc.get("chunk_total", 1)
+    score         = doc.get("_score", 0)
+    text          = doc.get("content_text", "")[:500]
+    dtype         = doc.get("doc_type", "")
+    chapter       = doc.get("chapter", "")
     chapter_title = doc.get("chapter_title", "")
 
     is_recital = dtype == "gdpr_recital"
-    icon = "💬" if is_recital else "🇪🇺"
-    label = f"{icon} {art_num} RODO"
+    label = art_num if is_recital else f"Art. {art_num} RODO"
+    badge_txt = "motyw RODO" if is_recital else "RODO"
     if not is_recital and total > 1:
         label += f" (część {chunk_idx + 1}/{total})"
 
-    with st.container():
-        col1, col2 = st.columns([5, 1])
-        with col1:
-            st.markdown(f"**{rank}. [{label}]({GDPR_URL})**")
-            if chapter and chapter_title:
-                st.caption(f"Rozdział {chapter} — {chapter_title}")
-        with col2:
-            st.caption("🇪🇺 RODO")
-            st.caption(f"score: {score:.3f}")
+    chapter_html = ""
+    if chapter and chapter_title:
+        chapter_html = f'<small class="text-muted">Rozdział {chapter} — {chapter_title}</small>'
 
-        with st.expander("📄 Treść", expanded=not is_recital):
-            st.markdown(f"<small>{text}</small>", unsafe_allow_html=True)
-
-        st.divider()
+    html = f"""
+    <article class="doc-list-item">
+      <header>
+        <a href="{GDPR_URL}" target="_blank">{label}</a>
+        <span class="status-badge status-final">{badge_txt}</span>
+      </header>
+      <main>
+        <h2>{chapter_html}</h2>
+        <p>{text}{'…' if len(doc.get("content_text",""))>500 else ''}</p>
+      </main>
+      <footer>
+        <small class="text-muted">score: {score:.3f}</small>
+      </footer>
+    </article>"""
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def render_card(doc: Dict, rank: int):
@@ -886,89 +987,350 @@ def render_card(doc: Dict, rank: int):
 
 def main():
     st.set_page_config(
-        page_title="UODO RAG — Wyszukiwarka Decyzji i Przepisów",
+        page_title="Portal Orzeczeń UODO — Wyszukiwarka",
         page_icon="🔐",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="collapsed",
     )
 
-    st.markdown(
-        """
+    st.markdown("""
     <style>
-        .main-header { font-size: 2rem; font-weight: 700; color: #1a365d; margin-bottom: 0; }
-        .sub-header { color: #4a5568; font-size: 0.95rem; margin-bottom: 1.5rem; }
-        .answer-box { background: #f0f7ff; border-left: 4px solid #3182ce;
-                      padding: 1rem 1.2rem; border-radius: 6px; margin: 1rem 0; }
-        div[data-testid="stExpander"] { border: 1px solid #e2e8f0; border-radius: 6px; }
+        /* ── Red Hat Display — font portalu UODO ── */
+        @import url('https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@400;500;600;700;800&display=swap');
+
+        /* ── Zmienne CSS z root.css portalu UODO ── */
+        :root {
+            --uodo-blue-10: #f5f8f8;
+            --uodo-blue-20: #e8f1fd;
+            --uodo-blue-30: #dde3ee;
+            --uodo-blue-33: #a5b3dd;
+            --uodo-blue-35: #6d83cc;
+            --uodo-blue-38: #356bcc;
+            --uodo-blue-40: #0058cc;
+            --uodo-blue-50: #275faa;
+            --uodo-blue-60: #0e4591;
+            --uodo-blue-80: #092e60;
+            --uodo-dark-gray: #3f444f;
+            --uodo-light-gray: #c8ccd3;
+            --uodo-red: #f25a5a;
+            --uodo-red-logo: #cd071e;
+            --uodo-red-dark: #b22222;
+            --uodo-white: #fff;
+            --uodo-black: rgba(26,26,28,1);
+            --body-color: rgba(26,26,28,1);
+            --content-width: 1070px;
+            --link-color: var(--uodo-blue-60);
+            --link-hover-color: var(--uodo-blue-40);
+            --separator-color: var(--uodo-blue-30);
+            --sidebar-bgcolor: var(--uodo-blue-10);
+            --uodo-border-radius: 2px;
+        }
+
+        /* ── Typografia ── */
+        html, body, [class*="css"] {
+            font-family: 'Red Hat Display', sans-serif !important;
+            color: var(--body-color);
+        }
+
+        /* ── Ukryj elementy Streamlit ── */
+        [data-testid="stHeader"]  { display: none; }
+        footer                    { display: none; }
+        .main .block-container    { padding-top: 0 !important; max-width: 1150px; }
+
+        /* ── Sidebar ── */
+        [data-testid="stSidebar"] { background: var(--uodo-blue-80); }
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stMarkdown,
+        [data-testid="stSidebar"] p { color: #c5d3e8 !important; }
+        [data-testid="stSidebar"] h2,
+        [data-testid="stSidebar"] h3 { color: white !important; }
+        [data-testid="stSidebar"] hr { border-color: rgba(255,255,255,0.15); }
+
+        /* ── Nagłówek strony — wzór page-header z header.css ── */
+        .page-header {
+            padding: 20px 0 16px;
+            box-shadow: 0 5px 20px rgba(14,69,145,0.07);
+            margin: -1rem -1rem 1.5rem -1rem;
+            background: var(--uodo-white);
+            border-bottom: 1px solid var(--uodo-blue-30);
+        }
+        .page-header-inner {
+            max-width: var(--content-width);
+            margin: 0 auto;
+            padding: 0 2rem;
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+        .page-header h1 {
+            color: var(--uodo-red-logo);
+            font-size: 1.8rem;
+            font-weight: 800;
+            margin: 0;
+            letter-spacing: -0.01em;
+        }
+        .page-header-sub {
+            color: var(--uodo-dark-gray);
+            font-size: 0.85rem;
+            margin: 2px 0 0;
+        }
+
+        /* ── Formularz wyszukiwania — featured-card z app.css ── */
+        .featured-card {
+            background-color: var(--uodo-blue-20);
+            padding: 2rem 2.5rem;
+            border-radius: var(--uodo-border-radius);
+            margin-bottom: 1.5rem;
+        }
+
+        /* ── Przyciski ── */
+        .stButton > button[kind="primary"] {
+            background-color: var(--uodo-blue-60) !important;
+            border-color: var(--uodo-blue-60) !important;
+            color: white !important;
+            font-family: 'Red Hat Display', sans-serif !important;
+            font-weight: 600 !important;
+            border-radius: var(--uodo-border-radius) !important;
+            transition: background-color 200ms !important;
+        }
+        .stButton > button[kind="primary"]:hover {
+            background-color: var(--uodo-blue-50) !important;
+            border-color: var(--uodo-blue-50) !important;
+        }
+
+        /* ── Karta wyniku — doc-list-item z app.css ── */
+        article.doc-list-item {
+            border: 1px solid var(--uodo-blue-30);
+            border-radius: var(--uodo-border-radius);
+            margin-bottom: 24px;
+            font-family: 'Red Hat Display', sans-serif;
+        }
+        article.doc-list-item > header {
+            background-color: var(--uodo-blue-10);
+            padding: 10px 20px;
+            display: flex;
+            flex-direction: row;
+            justify-content: space-between;
+            align-items: center;
+            border-radius: var(--uodo-border-radius) var(--uodo-border-radius) 0 0;
+            transition: background-color 200ms;
+        }
+        article.doc-list-item > header > a {
+            color: var(--uodo-blue-60);
+            font-weight: 600;
+            font-size: 1.1rem;
+            text-decoration: none;
+        }
+        article.doc-list-item > header time {
+            color: var(--uodo-dark-gray);
+            font-size: 0.85rem;
+        }
+        article.doc-list-item:hover > header {
+            background-color: var(--uodo-blue-50);
+            transition: background-color 200ms;
+        }
+        article.doc-list-item:hover > header > a,
+        article.doc-list-item:hover > header time,
+        article.doc-list-item:hover > header small {
+            color: var(--uodo-white) !important;
+        }
+        article.doc-list-item > main {
+            color: var(--uodo-dark-gray);
+            padding: 0 20px;
+        }
+        article.doc-list-item > main > * {
+            display: block;
+            margin-bottom: 16px;
+        }
+        article.doc-list-item > main > *:first-child {
+            margin-top: 16px;
+        }
+        article.doc-list-item > main h2 {
+            font-weight: 700;
+            font-size: 1rem;
+            line-height: 150%;
+            color: var(--uodo-dark-gray);
+            margin: 0 0 8px;
+        }
+        article.doc-list-item > main h2 a {
+            color: var(--uodo-dark-gray);
+            text-decoration: none;
+        }
+        article.doc-list-item > main h2 a:hover {
+            color: var(--uodo-blue-40);
+        }
+        article.doc-list-item > main a {
+            color: var(--uodo-dark-gray);
+            font-size: 0.92rem;
+            text-decoration: none;
+        }
+        article.doc-list-item > main p {
+            margin: 0;
+            font-size: 0.92rem;
+        }
+        article.doc-list-item > footer {
+            margin: 0 20px;
+            border-top: 1px solid var(--uodo-blue-30);
+            padding: 12px 0 14px;
+            overflow: hidden;
+        }
+
+        /* ── Badge statusu ── */
+        .status-badge {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 2px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .status-final       { background: #d1fae5; color: #065f46; }
+        .status-nonfinal    { background: #dbeafe; color: #1e40af; }
+        .status-repealed    { background: #f3f4f6; color: #374151; }
+        .status-unknown     { background: #fef9c3; color: #713f12; }
+
+        /* ── Tagi wyników — ui-result-tags z app.css ── */
+        .ui-result-tags {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.78rem;
+            color: var(--uodo-blue-60);
+            padding: 4px 0 0;
+        }
+        .ui-result-tag {
+            padding: 1px 8px;
+            border-right: 1px solid var(--uodo-blue-30);
+            line-height: 1.5;
+        }
+        .ui-result-tag:last-child { border-right: none; }
+
+        /* ── Odpowiedź AI ── */
+        .answer-box {
+            background: var(--uodo-blue-10);
+            border-left: 4px solid var(--uodo-blue-60);
+            padding: 1rem 1.2rem;
+            border-radius: 2px;
+            margin: 0.5rem 0 1rem;
+            font-family: 'Red Hat Display', sans-serif;
+        }
+
+        /* ── Linki globalne ── */
+        a { color: var(--link-color); text-decoration: none; }
+        a:hover { color: var(--link-hover-color); }
+
+        /* ── Taby ── */
+        [data-testid="stTabs"] [data-baseweb="tab"] {
+            font-family: 'Red Hat Display', sans-serif !important;
+            font-size: 0.88rem !important;
+        }
+        [data-testid="stTabs"] [aria-selected="true"] {
+            color: var(--uodo-blue-60) !important;
+            border-bottom-color: var(--uodo-blue-60) !important;
+        }
+
+        /* ── Expander ── */
+        div[data-testid="stExpander"] {
+            border: 1px solid var(--uodo-blue-30) !important;
+            border-radius: var(--uodo-border-radius) !important;
+        }
+
+        /* ── Keyword toggle ── */
+        .kw-toggle:hover { text-decoration: underline; }
+        .acts-row {
+            margin-top: 6px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.78rem;
+        }
+
+        /* ── Pasek wyszukiwania z ikoną filtrów ── */
+        .search-bar-wrap {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 0;
+        }
+        .filter-toggle-btn {
+            background: var(--uodo-blue-60);
+            border: none;
+            border-radius: 2px;
+            color: white;
+            padding: 8px 14px;
+            cursor: pointer;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            transition: background 200ms;
+        }
+        .filter-toggle-btn:hover { background: var(--uodo-blue-50); }
+        .filter-toggle-btn.active { background: var(--uodo-blue-80); }
+        .filters-panel {
+            background: var(--uodo-blue-20);
+            border: 1px solid var(--uodo-blue-30);
+            border-radius: 2px;
+            padding: 1.2rem 1.5rem 1rem;
+            margin-top: 0.75rem;
+            border-top: 2px solid var(--uodo-blue-60);
+        }
+        .filter-label {
+            font-size: 0.78rem;
+            font-weight: 700;
+            color: var(--uodo-blue-80);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-bottom: 4px;
+        }
     </style>
-    """,
-        unsafe_allow_html=True,
-    )
+    """, unsafe_allow_html=True)
 
-    st.markdown('<div class="main-header">🔐 UODO RAG</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="sub-header">Wyszukiwarka decyzji Prezesa UODO i przepisów ustawy '
-        "o ochronie danych osobowych · Graf powiązań · Analiza AI</div>",
-        unsafe_allow_html=True,
-    )
+    # ── Nagłówek portalu ────────────────────────────────────────
+    st.markdown("""
+    <div class="page-header">
+      <div class="page-header-inner">
+        <div>
+          <h1>Portal Orzeczeń UODO</h1>
+          <div class="page-header-sub">Wyszukiwarka decyzji Prezesa UODO · Ustawa o ochronie danych osobowych · RODO</div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # ── Sidebar ────────────────────────────────────────────────
+    # ── Sidebar — opcje techniczne ──────────────────────────────
     with st.sidebar:
         st.markdown("## ⚙️ Opcje")
 
-        st.markdown("### 🤖 Model AI")
-        provider = st.selectbox(
-            "Provider", PROVIDERS, index=PROVIDERS.index(DEFAULT_PROVIDER)
-        )
-
-        if provider == "Groq":
-            _key_env = GROQ_API_KEY
-            _key_label = "Groq API Key"
-            _key_env_name = "GROQ_API_KEY"
-        else:
-            _key_env = OLLAMA_CLOUD_API_KEY
-            _key_label = "Ollama Cloud API Key"
-            _key_env_name = "OLLAMA_CLOUD_API_KEY"
-
-        if _key_env:
-            st.caption(f"🔑 Klucz z .env ({_key_env_name})")
-            api_key = _key_env
-        else:
-            api_key = st.text_input(_key_label, type="password")
+        provider = st.selectbox("Provider LLM", ["Ollama Cloud", "Groq"],
+                                key="provider_select")
+        api_key = st.text_input("Klucz API", type="password",
+                                value=st.session_state.get("llm_api_key", ""),
+                                key="api_key_input")
 
         models = get_available_models(provider, api_key)
-        default_model = (
-            DEFAULT_OLLAMA_MODEL if provider == "Ollama Cloud" else DEFAULT_GROQ_MODEL
+
+        default_model = DEFAULT_OLLAMA_MODEL if provider == "Ollama Cloud" else DEFAULT_GROQ_MODEL
+        default_idx = next(
+            (i for i, m in enumerate(models) if default_model in m), 0
         )
-        default_idx = next((i for i, m in enumerate(models) if default_model in m), 0)
         selected_model = st.selectbox("Model", models, index=default_idx)
 
         st.session_state["llm_provider"] = provider
-        st.session_state["llm_model"] = selected_model
-        st.session_state["llm_api_key"] = api_key
+        st.session_state["llm_model"]    = selected_model
+        st.session_state["llm_api_key"]  = api_key
 
         st.markdown("---")
-
         use_graph = st.toggle("Graf powiązań", value=True)
-        use_llm = st.toggle("Odpowiedź AI", value=True)
 
         st.markdown("### 📂 Typ dokumentów")
         show_decisions = st.checkbox("Decyzje UODO", value=True)
         show_act = st.checkbox("Ustawa o ochronie danych (u.o.d.o.)", value=True)
         show_gdpr = st.checkbox("RODO (rozporządzenie UE 2016/679)", value=True)
 
-        st.markdown("### 🔍 Filtry decyzji")
-        status_filter = st.selectbox(
-            "Status", ["— wszystkie —", "prawomocna", "nieprawomocna"]
-        )
-
-        kw_filter = st.text_input(
-            "Słowo kluczowe (tag)",
-            placeholder="np. Nałożenie kary",
-        )
-
         st.markdown("---")
-
         try:
             stats = get_collection_stats()
             st.markdown("### 📊 Baza wiedzy")
@@ -976,14 +1338,10 @@ def main():
             st.metric("Artykuły u.o.d.o.", stats.get("act_chunks", 0))
             if stats.get("edges"):
                 st.metric("Powiązania w grafie", stats.get("edges", 0))
-            if stats.get("most_cited"):
-                st.markdown("**Najczęściej cytowane:**")
-                for sig, cnt in stats["most_cited"]:
-                    st.caption(f"`{sig}` — {cnt}×")
         except Exception:
             pass
 
-    # ── Filtry ────────────────────────────────────────────────
+    # ── Filtry ──────────────────────────────────────────────────
     doc_types = []
     if show_decisions:
         doc_types.append("uodo_decision")
@@ -992,33 +1350,82 @@ def main():
     if show_gdpr:
         doc_types.extend(["gdpr_article", "gdpr_recital"])
     if not doc_types:
-        doc_types = [
-            "uodo_decision",
-            "legal_act_article",
-            "gdpr_article",
-            "gdpr_recital",
-        ]
+        doc_types = ["uodo_decision", "legal_act_article", "gdpr_article", "gdpr_recital"]
 
-    filters = {"doc_types": doc_types}
-    if status_filter != "— wszystkie —":
-        filters["status"] = status_filter
+    taxonomy = _get_taxonomy_options()
 
-    if kw_filter.strip():
-        filters["keyword"] = kw_filter.strip()
-
-    # ── Pole zapytania ─────────────────────────────────────────
+    # ── Sekcja wyszukiwania ─────────────────────────────────────
     if "_example_query" in st.session_state:
         st.session_state["query_input"] = st.session_state.pop("_example_query")
 
-    query = st.text_input(
-        "Zadaj pytanie lub wpisz temat:",
-        placeholder="np. Kiedy administrator musi zgłosić naruszenie danych osobowych?",
-        key="query_input",
-    )
-    search_btn = st.button("🔍 Szukaj", type="primary")
+    col_q, col_ai, col_btn = st.columns([7, 1.5, 1.2])
+    with col_q:
+        query = st.text_input(
+            "Treść",
+            placeholder="Wpisz treść, sygnaturę lub temat...",
+            key="query_input",
+            label_visibility="collapsed",
+        )
+    with col_ai:
+        use_llm = st.checkbox("🤖 Użyj AI", value=True, key="use_llm_cb")
+    with col_btn:
+        search_btn = st.button("🔍 Szukaj", type="primary", use_container_width=True)
 
-    # ── Przykładowe pytania — zawsze widoczne ─────────────────
-    with st.expander("💡 **Przykładowe pytania**", expanded=not bool(query)):
+    with st.expander("🔽 Filtry zaawansowane", expanded=False):
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            st.markdown('<div class="filter-label">Sygnatura</div>', unsafe_allow_html=True)
+            sig_filter = st.text_input("Sygnatura", placeholder="np. DKN.5110",
+                                       label_visibility="collapsed", key="sig_filter")
+            st.markdown('<div class="filter-label">Status</div>', unsafe_allow_html=True)
+            status_filter = st.selectbox(
+                "Status", ["— wszystkie —", "prawomocna", "nieprawomocna", "uchylona"],
+                label_visibility="collapsed", key="status_filter",
+            )
+            st.markdown('<div class="filter-label">Słowa kluczowe</div>', unsafe_allow_html=True)
+            kw_filter = st.text_input(
+                "Słowo kluczowe", placeholder="np. nałożenie kary",
+                label_visibility="collapsed", key="kw_filter",
+            )
+        with fc2:
+            st.markdown('<div class="filter-label">Rodzaj decyzji</div>', unsafe_allow_html=True)
+            tax_decision = st.multiselect(
+                "Rodzaj decyzji", options=taxonomy.get("term_decision_type", []),
+                label_visibility="collapsed", key="tax_decision",
+            )
+            st.markdown('<div class="filter-label">Środek naprawczy</div>', unsafe_allow_html=True)
+            tax_measure = st.multiselect(
+                "Środek naprawczy", options=taxonomy.get("term_corrective_measure", []),
+                label_visibility="collapsed", key="tax_measure",
+            )
+            st.markdown('<div class="filter-label">Podstawa prawna</div>', unsafe_allow_html=True)
+            tax_legal_basis = st.multiselect(
+                "Podstawa prawna", options=taxonomy.get("term_legal_basis", []),
+                label_visibility="collapsed", key="tax_legal_basis",
+            )
+        with fc3:
+            st.markdown('<div class="filter-label">Rodzaj naruszenia</div>', unsafe_allow_html=True)
+            tax_violation = st.multiselect(
+                "Rodzaj naruszenia", options=taxonomy.get("term_violation_type", []),
+                label_visibility="collapsed", key="tax_violation",
+            )
+            st.markdown('<div class="filter-label">Sektor</div>', unsafe_allow_html=True)
+            tax_sector = st.multiselect(
+                "Sektor", options=taxonomy.get("term_sector", []),
+                label_visibility="collapsed", key="tax_sector",
+            )
+            st.markdown('<div class="filter-label">Data ogłoszenia (od–do)</div>',
+                        unsafe_allow_html=True)
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                date_from = st.text_input("Od", placeholder="2020-01-01",
+                                          label_visibility="collapsed", key="date_from")
+            with dcol2:
+                date_to = st.text_input("Do", placeholder="2026-12-31",
+                                        label_visibility="collapsed", key="date_to")
+
+    # ── Przykładowe pytania ─────────────────────────────────────
+    with st.expander("💡 Przykładowe pytania", expanded=not bool(query)):
         st.caption("Kliknij pytanie aby je wyszukać:")
         examples = [
             ("🔔", "Kiedy wymagane jest zgłoszenie naruszenia danych?"),
@@ -1036,24 +1443,51 @@ def main():
         cols = st.columns(2)
         for idx, (emoji, question) in enumerate(examples):
             col = cols[idx % 2]
-            if col.button(
-                f"{emoji} {question}", key=f"example_{idx}", use_container_width=True
-            ):
+            if col.button(f"{emoji} {question}", key=f"example_{idx}",
+                          use_container_width=True):
                 st.session_state["_example_query"] = question
                 st.rerun()
 
-    if query and (
+    # ── Budowanie filtrów ───────────────────────────────────────
+    filters = {"doc_types": doc_types}
+
+    # Filtry dotyczące tylko decyzji UODO
+    if "uodo_decision" in doc_types:
+        if status_filter != "— wszystkie —":
+            filters["status"] = status_filter
+        if tax_decision:
+            filters["term_decision_type"] = tax_decision
+        if tax_violation:
+            filters["term_violation_type"] = tax_violation
+        if tax_legal_basis:
+            filters["term_legal_basis"] = tax_legal_basis
+        if tax_measure:
+            filters["term_corrective_measure"] = tax_measure
+        if tax_sector:
+            filters["term_sector"] = tax_sector
+
+    # Filtr słowa kluczowego i sygnatury — dla wszystkich typów
+    if kw_filter.strip():
+        filters["keyword"] = kw_filter.strip()
+
+    # ── Wyszukiwanie ────────────────────────────────────────────
+    # Dopasuj zapytanie do sygnatury jeśli podano w osobnym polu
+    effective_query = query
+    if sig_filter.strip() and not query.strip():
+        effective_query = sig_filter.strip()
+
+    if effective_query and (
         search_btn
-        or st.session_state.get("last_query") != query
+        or st.session_state.get("last_query") != effective_query
         or st.session_state.get("last_filters") != str(filters)
     ):
-        st.session_state["last_query"] = query
+        st.session_state["last_query"] = effective_query
         st.session_state["last_filters"] = str(filters)
 
         with st.spinner("🔍 Wyszukuję..."):
             t0 = time.time()
             _tags = []
-            sig_match = _RE_QUERY_SIG.match(query)
+            sig_match = _RE_QUERY_SIG.match(effective_query)
             if sig_match:
                 sig_norm = sig_match.group(1).upper()
                 exact = fetch_by_signature(sig_norm)
@@ -1073,25 +1507,21 @@ def main():
                         f"Nie znaleziono decyzji o sygnaturze **{sig_norm}** w bazie."
                     )
                     docs, _tags = hybrid_search(
-                        query, top_k=TOP_K, filters=filters, use_graph=use_graph
+                        effective_query, top_k=TOP_K, filters=filters, use_graph=use_graph
                     )
             else:
                 docs, _tags = hybrid_search(
-                    query, top_k=TOP_K, filters=filters, use_graph=use_graph
+                    effective_query, top_k=TOP_K, filters=filters, use_graph=use_graph
                 )
             search_time = time.time() - t0
 
         if not docs:
-            st.warning(
-                "Nie znaleziono dokumentów. Spróbuj zmienić filtry lub sformułowanie."
-            )
+            st.warning("Nie znaleziono dokumentów. Spróbuj zmienić filtry lub sformułowanie.")
             return
 
-        decisions = [d for d in docs if d.get("doc_type") == "uodo_decision"]
-        act_arts = [d for d in docs if d.get("doc_type") == "legal_act_article"]
-        gdpr_docs = [
-            d for d in docs if d.get("doc_type") in ("gdpr_article", "gdpr_recital")
-        ]
+        decisions  = [d for d in docs if d.get("doc_type") == "uodo_decision"]
+        act_arts   = [d for d in docs if d.get("doc_type") == "legal_act_article"]
+        gdpr_docs  = [d for d in docs if d.get("doc_type") in ("gdpr_article", "gdpr_recital")]
         graph_docs = [d for d in docs if d.get("_source") == "graph"]
 
         _tag_info = f" · tag: `{kw_filter}`" if kw_filter.strip() else ""
@@ -1107,12 +1537,12 @@ def main():
             )
 
         if use_llm:
-            context = build_context(docs, query)
+            context = build_context(docs, effective_query, filters=filters)
             st.markdown("### 💬 Odpowiedź AI")
             answer_placeholder = st.empty()
             full_answer = ""
             try:
-                for chunk in call_llm_stream(query, context):
+                for chunk in call_llm_stream(effective_query, context):
                     full_answer += chunk
                     answer_placeholder.markdown(
                         f'<div class="answer-box">{full_answer}</div>',
@@ -1122,15 +1552,13 @@ def main():
                 st.error(f"Błąd LLM: {e}")
 
         st.markdown(f"### 📋 Dokumenty ({len(docs)})")
-        tabs = st.tabs(
-            [
-                f"Wszystkie ({len(docs)})",
-                f"Decyzje UODO ({len(decisions)})",
-                f"Ustawa u.o.d.o. ({len(act_arts)})",
-                f"RODO ({len(gdpr_docs)})",
-                f"Graf ({len(graph_docs)})",
-            ]
-        )
+        tabs = st.tabs([
+            f"Wszystkie ({len(docs)})",
+            f"Decyzje UODO ({len(decisions)})",
+            f"Ustawa u.o.d.o. ({len(act_arts)})",
+            f"RODO ({len(gdpr_docs)})",
+            f"Graf ({len(graph_docs)})",
+        ])
 
         with tabs[0]:
             for i, doc in enumerate(docs, 1):

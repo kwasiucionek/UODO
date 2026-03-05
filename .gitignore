@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Dane i modele
+*.json.bak
+*.bin
+*.pt
+*.safetensors
+
+# Qdrant (lokalne storage)
+qdrant_storage/
+qdrant_data/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Zmienne środowiskowe
+.env
+.env.*
+!.env.example
+
+# Logi
+*.log
+logs/
+
+# System
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

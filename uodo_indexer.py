@@ -154,6 +154,12 @@ def build_payload(doc: Dict) -> Dict[str, Any]:
             {sig: rel for sig, rel in relation_map.items() if sig},
             ensure_ascii=False
         )[:2000],
+        # Taksonomia UODO — rozbita wg grup labelów
+        "term_decision_type":      doc.get("term_decision_type", []),
+        "term_violation_type":     doc.get("term_violation_type", []),
+        "term_legal_basis":        doc.get("term_legal_basis", []),
+        "term_corrective_measure": doc.get("term_corrective_measure", []),
+        "term_sector":             doc.get("term_sector", []),
     }
 
 
@@ -198,6 +204,11 @@ def index_decisions(jsonl_path: str, qdrant_url: str = QDRANT_URL,
             ("year",                PayloadSchemaType.INTEGER),
             ("keywords",            PayloadSchemaType.KEYWORD),  # filtrowanie po tagach
             ("doc_type",            PayloadSchemaType.KEYWORD),
+            ("term_decision_type",      PayloadSchemaType.KEYWORD),
+            ("term_violation_type",     PayloadSchemaType.KEYWORD),
+            ("term_legal_basis",        PayloadSchemaType.KEYWORD),
+            ("term_corrective_measure", PayloadSchemaType.KEYWORD),
+            ("term_sector",             PayloadSchemaType.KEYWORD),
         ]:
             client.create_payload_index(COLLECTION_NAME, field, schema)
     else:
