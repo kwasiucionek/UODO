@@ -376,28 +376,13 @@ def hybrid_search(query: str, top_k: int = TOP_K,
                     seen_keys.add(key)
         merged.sort(key=lambda d: -d.get("_score", 0))
 
-    # Semantic search osobno dla każdego typu dokumentów
-    # — żeby każdy typ miał zagwarantowane top_k miejsc, nie rywalizował z innymi
-    requested_types = (filters or {}).get("doc_types") or []
-    base_filters_no_type = {k: v for k, v in (filters or {}).items() if k != "doc_types"}
-
-    for dtype in requested_types:
-        type_filters = base_filters_no_type.copy()
-        type_filters["doc_types"] = [dtype]
-        for d in semantic_search(query, top_k=top_k, filters=type_filters):
-            key = _doc_key(d)
-            if key not in seen_keys:
-                merged.append(d)
-                seen_keys.add(key)
-
-    # Fallback: semantic bez żadnych filtrów (łapie dokumenty bez tagów i bez typu)
-    for d in semantic_search(query, top_k=top_k, filters=filters):
+    # Semantic search bez filtra tagów — wszystkie typy razem, ranking po score
+    for d in semantic_search(query, top_k=top_k * 2, filters=filters):
         key = _doc_key(d)
         if key not in seen_keys:
             merged.append(d)
             seen_keys.add(key)
 
-    # Posortuj wszystko po score
     merged.sort(key=lambda d: -d.get("_score", 0))
 
     if not use_graph or not merged:
