@@ -13,7 +13,8 @@ import os
 import pickle
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from collections.abc import Generator
+from typing import Any
 
 import networkx as nx
 import streamlit as st
@@ -34,7 +35,7 @@ EMBED_MODEL = os.getenv("EMBED_MODEL", "sdadas/mmlw-retrieval-roberta-large")
 try:
     from dotenv import load_dotenv
 
-    load_dotenv()
+    _ = load_dotenv()
 except ImportError:
     pass
 
@@ -71,7 +72,7 @@ def get_embedder():
 
 
 @st.cache_resource
-def get_graph() -> Optional[nx.DiGraph]:
+def get_graph() -> nx.DiGraph | None:  # type: ignore[type-arg]
     if os.path.exists(GRAPH_PATH):
         with open(GRAPH_PATH, "rb") as f:
             return pickle.load(f)
@@ -125,11 +126,11 @@ def get_graph() -> Optional[nx.DiGraph]:
 # ─────────────────────────── WYSZUKIWANIE ────────────────────────
 
 
-def embed(text: str) -> List[float]:
+def embed(text: str) -> list[float]:
     return get_embedder().encode(text, normalize_embeddings=True).tolist()
 
 
-def semantic_search(query: str, top_k: int = TOP_K, filters: Dict = None) -> List[Dict]:
+def semantic_search(query: str, top_k: int = TOP_K, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     vec = embed(query)
     client = get_qdrant()
 
@@ -177,8 +178,8 @@ def semantic_search(query: str, top_k: int = TOP_K, filters: Dict = None) -> Lis
 
 
 def graph_expand(
-    seed_sigs: List[str], depth: int = GRAPH_DEPTH
-) -> List[Tuple[str, str, float]]:
+    seed_sigs: list[str], depth: int = GRAPH_DEPTH
+) -> list[tuple[str, str, float]]:
     G = get_graph()
     if G is None:
         return []
@@ -218,7 +219,7 @@ def graph_expand(
     return result[:15]
 
 
-def fetch_by_signature(sig: str) -> Optional[Dict]:
+def fetch_by_signature(sig: str) -> dict[str, Any] | None:
     client = get_qdrant()
     pts, _ = client.scroll(
         collection_name=COLLECTION_NAME,
@@ -239,7 +240,7 @@ def fetch_by_signature(sig: str) -> Optional[Dict]:
     return None
 
 
-def keyword_exact_search(keyword: str, filters: Dict = None) -> List[Dict]:
+def keyword_exact_search(keyword: str, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Pobiera WSZYSTKIE dokumenty z danym tagiem (scroll z paginacją)."""
     client = get_qdrant()
     must = [FieldCondition(key="keywords", match=MatchValue(value=keyword))]
@@ -263,7 +264,7 @@ def keyword_exact_search(keyword: str, filters: Dict = None) -> List[Dict]:
                 FieldCondition(key="doc_type", match=MatchAny(any=filters["doc_types"]))
             )
 
-    qdrant_filter = Filter(must=must)
+    qdrant_filter = Filter(must=must) if must else None
     docs = []
     offset = None
     while True:
@@ -285,11 +286,9 @@ def keyword_exact_search(keyword: str, filters: Dict = None) -> List[Dict]:
     return docs
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-@st.cache_data(ttl=3600)
-def _get_taxonomy_options() -> Dict[str, List[str]]:
+@st.cache_data(ttl=3600, show_spinner=False)
+def _get_taxonomy_options() -> dict[str, list[str]]:
     """Pobiera unikalne wartości pól taksonomii z Qdrant."""
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
     client = get_qdrant()
     result = {
         "term_decision_type": [],
@@ -324,7 +323,8 @@ def _get_taxonomy_options() -> Dict[str, List[str]]:
     return result
 
 
-def _get_all_tags() -> List[str]:
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_all_tags() -> list[str]:
     """Pobiera wszystkie unikalne tagi z kolekcji (cache 5 min)."""
     client = get_qdrant()
     all_tags = set()
@@ -349,7 +349,7 @@ def _get_all_tags() -> List[str]:
     return sorted(all_tags)
 
 
-def _extract_tags_with_llm(query: str, available_tags: List[str]) -> List[str]:
+def _extract_tags_with_llm(query: str, available_tags: list[str]) -> list[str]:
     """Pyta LLM o tagi pasujące do zapytania.
     Zwraca maks. 8 tagów z listy + maks. 2 nowe tagi spoza listy (oznaczone [NOWY])."""
     provider = st.session_state.get("llm_provider", DEFAULT_PROVIDER)
@@ -416,26 +416,13 @@ def _extract_tags_with_llm(query: str, available_tags: List[str]) -> List[str]:
         return []
 
 
-def _get_matched_tags(query: str) -> List[str]:
+def _get_matched_tags(query: str) -> list[str]:
     """Zwraca listę tagów pasujących do zapytania (przez LLM)."""
     available_tags = _get_all_tags()
     return _extract_tags_with_llm(query, available_tags)
 
 
-def _keyword_search_from_query(query: str, filters: Dict = None) -> List[Dict]:
-    """Pyta LLM o tagi pasujące do zapytania, następnie pobiera dokumenty exact match."""
-    matched_tags = _get_matched_tags(query)
-    all_docs, seen_sigs = [], set()
-    for tag in matched_tags:
-        for d in keyword_exact_search(tag, filters=filters):
-            sig = d.get("signature", "")
-            if sig not in seen_sigs:
-                all_docs.append(d)
-                seen_sigs.add(sig)
-    return all_docs
-
-
-def _doc_key(d: Dict) -> str:
+def _doc_key(d: dict[str, Any]) -> str:
     """Unikalny klucz dokumentu do deduplikacji."""
     # Dla artykułów ustawy i RODO użyj doc_id lub kombinacji pól
     doc_id = d.get("doc_id", "")
@@ -451,9 +438,9 @@ def _doc_key(d: Dict) -> str:
 
 
 def hybrid_search(
-    query: str, top_k: int = TOP_K, filters: Dict = None, use_graph: bool = True
-):
-    """Zwraca (List[Dict], List[str]) — dokumenty i użyte tagi."""
+    query: str, top_k: int = TOP_K, filters: dict[str, Any] | None = None, use_graph: bool = True
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Zwraca (list[dict], list[str]) — dokumenty i użyte tagi."""
     matched_tags = _get_matched_tags(query)
 
     seen_keys = set()
@@ -559,8 +546,8 @@ def _extract_fragment(content: str, query: str, max_len: int = 1200) -> str:
     return fragment
 
 
-def build_context(docs: List[Dict], query: str, max_chars: int = 14000,
-                  filters: Dict = None) -> str:
+def build_context(docs: list[dict[str, Any]], query: str, max_chars: int = 14000,
+                  filters: dict[str, Any] | None = None) -> str:
     # Opisz aktywne filtry słownie
     filter_lines = []
     f = filters or {}
@@ -583,7 +570,7 @@ def build_context(docs: List[Dict], query: str, max_chars: int = 14000,
     if filter_lines:
         filter_note = (
             "UWAGA: Wyniki zostały zawężone przez użytkownika za pomocą filtrów:\n"
-            + "\n".join(f"  • {l}" for l in filter_lines)
+            + "\n".join(f"  • {line}" for line in filter_lines)
             + "\nOdpowiadaj z uwzględnieniem tego kontekstu filtrowania.\n"
         )
 
@@ -652,7 +639,7 @@ def build_context(docs: List[Dict], query: str, max_chars: int = 14000,
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_available_models(provider: str, api_key: str = None) -> List[str]:
+def get_available_models(provider: str, api_key: str | None = None) -> list[str]:
     """Pobiera listę aktywnych modeli z API providera."""
     if provider == "Groq":
         try:
@@ -690,10 +677,10 @@ def get_available_models(provider: str, api_key: str = None) -> List[str]:
 def call_llm_stream(
     query: str,
     context: str,
-    provider: str = None,
-    model: str = None,
-    api_key: str = None,
-):
+    provider: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+) -> Generator[str, Any, None]:
     """Stream odpowiedzi z Groq lub Ollama Cloud."""
     system = (
         "Jesteś ekspertem ds. ochrony danych osobowych i prawa RODO. "
@@ -717,9 +704,9 @@ def call_llm_stream(
         from groq import Groq
 
         client = Groq(api_key=api_key or GROQ_API_KEY)
-        for chunk in client.chat.completions.create(
-            model=model,
-            messages=messages,
+        for chunk in client.chat.completions.create(  # type: ignore[call-overload]
+            model=model or "",
+            messages=messages,  # type: ignore[arg-type]
             max_tokens=2048,
             stream=True,
         ):
@@ -758,7 +745,7 @@ def call_llm_stream(
 
 
 @st.cache_data(ttl=3600)
-def get_collection_stats() -> Dict:
+def get_collection_stats() -> dict[str, Any]:
     client = get_qdrant()
     info = client.get_collection(COLLECTION_NAME)
     total = info.points_count
@@ -810,7 +797,7 @@ def get_collection_stats() -> Dict:
 # ─────────────────────────── KARTY WYNIKÓW ───────────────────────
 
 
-def decision_url(doc: Dict) -> str:
+def decision_url(doc: dict[str, Any]) -> str:
     sig = doc.get("signature", "")
     url = doc.get("source_url", "")
     if url:
@@ -821,7 +808,7 @@ def decision_url(doc: Dict) -> str:
     return f"{UODO_PORTAL_BASE}/urn:ndoc:gov:pl:uodo:{year}:{slug}/content"
 
 
-def render_act_article_card(doc: Dict, rank: int):
+def render_act_article_card(doc: dict[str, Any], rank: int):
     """Karta dla artykułu ustawy o ochronie danych osobowych."""
     art_num = doc.get("article_num", "?")
     chunk_idx = doc.get("chunk_index", 0)
@@ -852,12 +839,11 @@ def render_act_article_card(doc: Dict, rank: int):
     st.markdown(html, unsafe_allow_html=True)
 
 
-def render_decision_card(doc: Dict, rank: int):
+def render_decision_card(doc: dict[str, Any], rank: int):
     """Karta dla decyzji UODO."""
     sig       = doc.get("signature", "?")
     status    = doc.get("status", "")
     date      = doc.get("date_published", "") or doc.get("date_issued", "")
-    score     = doc.get("_score", 0)
     source    = doc.get("_source", "")
     graph_rel = doc.get("_graph_relation", "")
     title     = doc.get("title_full", "") or doc.get("title", "")
@@ -933,7 +919,7 @@ def render_decision_card(doc: Dict, rank: int):
     st.divider()
 
 
-def render_gdpr_card(doc: Dict, rank: int):
+def render_gdpr_card(doc: dict[str, Any], rank: int):
     """Karta dla artykułu lub motywy RODO."""
     art_num       = doc.get("article_num", "?")
     chunk_idx     = doc.get("chunk_index", 0)
@@ -971,7 +957,7 @@ def render_gdpr_card(doc: Dict, rank: int):
     st.markdown(html, unsafe_allow_html=True)
 
 
-def render_card(doc: Dict, rank: int):
+def render_card(doc: dict[str, Any], rank: int):
     """Dispatcher — wybiera typ karty na podstawie doc_type."""
     dtype = doc.get("doc_type", "")
     if dtype == "legal_act_article":
@@ -1465,6 +1451,16 @@ def main():
             filters["term_corrective_measure"] = tax_measure
         if tax_sector:
             filters["term_sector"] = tax_sector
+        if date_from.strip():
+            try:
+                filters["year_from"] = int(date_from.strip()[:4])
+            except ValueError:
+                pass
+        if date_to.strip():
+            try:
+                filters["year_to"] = int(date_to.strip()[:4])
+            except ValueError:
+                pass
 
     # Filtr słowa kluczowego i sygnatury — dla wszystkich typów
     if kw_filter.strip():
