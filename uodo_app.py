@@ -18,6 +18,7 @@ from typing import Any
 
 import networkx as nx
 import streamlit as st
+from jinja2 import Environment
 from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue, Range
 
@@ -46,7 +47,7 @@ OLLAMA_LOCAL_URL = os.getenv("OLLAMA_LOCAL_URL", "http://localhost:11434")
 
 PROVIDERS = ["Ollama Cloud", "Groq"]
 DEFAULT_PROVIDER = "Ollama Cloud"
-DEFAULT_OLLAMA_MODEL = "gpt-oss:120b"
+DEFAULT_OLLAMA_MODEL = "kimi-k2.5"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 
 TOP_K = 8
@@ -54,6 +55,134 @@ GRAPH_DEPTH = 2
 UODO_PORTAL_BASE = "https://orzeczenia.uodo.gov.pl/document"
 ISAP_ACT_URL = "https://isap.sejm.gov.pl/isap.nsf/DocDetails.xsp?id=WDU20190001781"
 GDPR_URL = "https://eur-lex.europa.eu/legal-content/PL/TXT/?uri=CELEX:32016R0679"
+
+
+# ─────────────────────────── MODELE STANU ────────────────────────
+# Wzorzec z kursu Software 3.0: Reasoning Step (moduł 4) + Memory (moduł 2)
+
+from enum import Enum
+
+from pydantic import BaseModel, Field
+
+
+class QueryType(str, Enum):
+    DECISION_LOOKUP = "szukam_decyzji"  # zapytanie o konkretną decyzję/karę
+    LEGAL_ARTICLE = "szukam_przepisu"  # pytanie o artykuł ustawy/RODO
+    GENERAL_ANALYSIS = "analiza_ogólna"  # szeroka analiza tematu
+    FACTUAL = "pytanie_faktyczne"  # kto/kiedy/ile
+
+
+class QueryDecomposition(BaseModel):
+    """Reasoning Step — LLM dekompozycja pytania PRZED wyszukiwaniem.
+    Wzorzec z lekcji 4.1: zamiast szukać surowej frazy, model najpierw
+    analizuje intencję i generuje ustrukturyzowane parametry wyszukiwania.
+    """
+
+    original_query: str
+    query_type: QueryType = QueryType.GENERAL_ANALYSIS
+    search_keywords: list[str] = Field(
+        default_factory=list,
+        description="Synonimy i pojęcia prawne do wyszukiwania (max 5)",
+    )
+    gdpr_articles_hint: list[str] = Field(
+        default_factory=list,
+        description="Artykuły RODO które mogą być istotne (np. ['Art. 5', 'Art. 83'])",
+    )
+    uodo_act_articles_hint: list[str] = Field(
+        default_factory=list, description="Artykuły u.o.d.o. które mogą być istotne"
+    )
+    year_from_hint: int | None = None
+    year_to_hint: int | None = None
+    enriched_query: str = Field(
+        description="Rozszerzone zapytanie do wyszukiwania semantycznego"
+    )
+    reasoning: str = Field(
+        description="Krótkie uzasadnienie dekompozycji (widoczne w UI)"
+    )
+
+
+class MemoryEntry(BaseModel):
+    """Wpis w pamięci epizodycznej."""
+
+    query: str
+    enriched_query: str
+    decomposition_summary: str
+    top_signatures: list[str] = []  # sygnatury top decyzji
+    top_articles: list[str] = []  # numery artykułów
+    answer_snippet: str = ""  # pierwsze 300 znaków odpowiedzi AI
+
+
+class AgentMemory(BaseModel):
+    """Pamięć epizodyczna sesji — wzorzec z lekcji 2.1 Memory Engineering.
+    Przechowuje ostatnie N analiz; używana do:
+    - wzbogacania kontekstu o poprzednie wyniki (bez ponownego wyszukiwania)
+    - pokazania użytkownikowi historii sesji
+    """
+
+    entries: list[MemoryEntry] = []
+    max_entries: int = 5
+
+    def add(self, entry: MemoryEntry) -> None:
+        self.entries.insert(0, entry)
+        self.entries = self.entries[: self.max_entries]
+
+    def find_related(self, query: str) -> list[MemoryEntry]:
+        """Prosta heurystyka: wpisy z co najmniej jednym wspólnym słowem kluczowym."""
+        q_words = {w.lower() for w in re.split(r"\W+", query) if len(w) > 3}
+        result = []
+        for e in self.entries:
+            e_words = {w.lower() for w in re.split(r"\W+", e.query) if len(w) > 3}
+            if q_words & e_words:
+                result.append(e)
+        return result
+
+
+# ─────────────────────────── JINJA2 SZABLONY KONTEKSTU ────────────
+# Wzorzec z lekcji 1.2: Context Engineering z szablonami Jinja2
+# Zamiast sklejać f-stringi, każdy typ dokumentu ma własny szablon.
+# Pozwala na precyzyjną kontrolę "zakotwiczenia uwagi" modelu.
+
+_JINJA_ENV = Environment(keep_trailing_newline=True)
+
+# POPRAWKA 1: Nagłówek jawnie wymienia WSZYSTKIE typy dokumentów obecne w kontekście
+# i priorytyzuje decyzje UODO — duże modele (kimi2.5, gpt-4o) czytają nagłówek
+# dosłownie i jeśli nie widzą w nim RODO, traktują artykuły RODO jako "nie-decyzje".
+_TPL_HEADER = _JINJA_ENV.from_string("""Poniżej znajdują się dokumenty powiązane z pytaniem: «{{ query }}»
+Zbiór zawiera trzy typy dokumentów:
+  1. DECYZJE UODO — decyzje administracyjne Prezesa Urzędu Ochrony Danych Osobowych
+  2. ARTYKUŁY u.o.d.o. — przepisy ustawy o ochronie danych osobowych (Dz.U. 2019 poz. 1781)
+  3. ARTYKUŁY RODO — przepisy rozporządzenia (UE) 2016/679 (Dz.Urz. UE L 119/1)
+Każdy dokument jest wyraźnie oznaczony typem w nagłówku bloku.
+{% if filter_note %}{{ filter_note }}{% endif %}
+{% if memory_note %}{{ memory_note }}{% endif %}
+Odpowiadaj na podstawie poniższych dokumentów, ze szczególnym uwzględnieniem DECYZJI UODO.
+Podawaj sygnatury decyzji [np. DKN.XXX.X.XXXX, ZSOŚS, i in.] i numery artykułów [np. Art. X u.o.d.o.].
+""")
+
+_TPL_DECISION = _JINJA_ENV.from_string("""[{{ rank }}] DECYZJA UODO {{ sig }} ({{ date }}, {{ status }}){% if graph_rel %} [powiązana: {{ graph_rel }}]{% endif %}
+
+  SYGNATURA:    {{ sig }}
+  DATA:         {{ date }}
+  STATUS:       {{ status }}
+{% if keywords %}  TAGI:         {{ keywords }}
+{% endif %}{% if acts %}  POWOŁANE AKTY: {{ acts }}
+{% endif %}  TREŚĆ:
+{{ fragment }}
+""")
+
+_TPL_ACT_ARTICLE = _JINJA_ENV.from_string("""[{{ rank }}] USTAWA o ochronie danych osobowych — Art. {{ art_num }}{% if label_suffix %} {{ label_suffix }}{% endif %}
+
+  ŹRÓDŁO: Dz.U. 2019 poz. 1781 (u.o.d.o.)
+  TREŚĆ:
+{{ text }}
+""")
+
+_TPL_GDPR = _JINJA_ENV.from_string("""[{{ rank }}] RODO (rozporządzenie 2016/679) — {{ prefix }}
+
+  ŹRÓDŁO: Dz.Urz. UE L 119/1
+  TREŚĆ:
+{{ text }}
+""")
 
 
 # ─────────────────────────── CACHE / ZASOBY ──────────────────────
@@ -130,7 +259,12 @@ def embed(text: str) -> list[float]:
     return get_embedder().encode(text, normalize_embeddings=True).tolist()
 
 
-def semantic_search(query: str, top_k: int = TOP_K, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def semantic_search(
+    query: str,
+    top_k: int = TOP_K,
+    filters: dict[str, Any] | None = None,
+    score_threshold: float = 0.25,
+) -> list[dict[str, Any]]:
     vec = embed(query)
     client = get_qdrant()
 
@@ -151,8 +285,13 @@ def semantic_search(query: str, top_k: int = TOP_K, filters: dict[str, Any] | No
             must.append(
                 FieldCondition(key="doc_type", match=MatchAny(any=filters["doc_types"]))
             )
-        for term_field in ("term_decision_type", "term_violation_type",
-                           "term_legal_basis", "term_corrective_measure", "term_sector"):
+        for term_field in (
+            "term_decision_type",
+            "term_violation_type",
+            "term_legal_basis",
+            "term_corrective_measure",
+            "term_sector",
+        ):
             vals = filters.get(term_field, [])
             if vals:
                 must.append(FieldCondition(key=term_field, match=MatchAny(any=vals)))
@@ -165,7 +304,7 @@ def semantic_search(query: str, top_k: int = TOP_K, filters: dict[str, Any] | No
         limit=top_k,
         query_filter=qdrant_filter,
         with_payload=True,
-        score_threshold=0.25,
+        score_threshold=score_threshold,
     )
 
     docs = []
@@ -240,7 +379,9 @@ def fetch_by_signature(sig: str) -> dict[str, Any] | None:
     return None
 
 
-def keyword_exact_search(keyword: str, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def keyword_exact_search(
+    keyword: str, filters: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     """Pobiera WSZYSTKIE dokumenty z danym tagiem (scroll z paginacją)."""
     client = get_qdrant()
     must = [FieldCondition(key="keywords", match=MatchValue(value=keyword))]
@@ -286,37 +427,86 @@ def keyword_exact_search(keyword: str, filters: dict[str, Any] | None = None) ->
     return docs
 
 
+# ── Taksonomia portalu UODO — wartości z plików txKind.json, txSector.json,
+#    txRemedyRODO.json, taxo-infringement.json, taxo-base.json ──────────────
+_TAXONOMY_STATIC: dict[str, list[str]] = {
+    "term_decision_type": [
+        "nakaz",
+        "odmowa",
+        "umorzenie",
+        "upomnienie",
+        "inne",
+    ],
+    "term_sector": [
+        "BIP",
+        "DODO",
+        "Finanse",
+        "Marketing",
+        "Mieszkalnictwo",
+        "Monitoring",
+        "Pozostałe",
+        "Szkolnictwo",
+        "Telekomunikacja",
+        "Ubezpieczenia",
+        "Zatrudnienie",
+        "Zdrowie",
+    ],
+    "term_corrective_measure": [
+        "ostrzeżenie",
+        "upomnienie",
+        "nakaz spełnienia żądania",
+        "dostosowanie",
+        "poinformowanie",
+        "ograniczenie przetwarzania",
+        "sprostowanie/usunięcie/ograniczenie",
+        "cofnięcie certyfikacji",
+        "administracyjna kara pieniężna",
+        "państwo trzecie",
+    ],
+    "term_violation_type": [],  # wypełniane dynamicznie z Qdrant (zbyt duże)
+    "term_legal_basis": [],  # j.w.
+}
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _get_taxonomy_options() -> dict[str, list[str]]:
-    """Pobiera unikalne wartości pól taksonomii z Qdrant."""
-    client = get_qdrant()
-    result = {
-        "term_decision_type": [],
-        "term_violation_type": [],
-        "term_legal_basis": [],
-        "term_corrective_measure": [],
-        "term_sector": [],
-    }
+    """Zwraca opcje filtrów taksonomii.
+    Dla term_decision_type / term_sector / term_corrective_measure używa stałych
+    wartości z taksonomii portalu UODO. Dla term_violation_type i term_legal_basis
+    pobiera unikalne wartości z Qdrant (zbyt wiele wariantów do hardkodowania).
+    """
+    result = {k: list(v) for k, v in _TAXONOMY_STATIC.items()}
+    dynamic_fields = [f for f, v in _TAXONOMY_STATIC.items() if not v]
+    if not dynamic_fields:
+        return result
     try:
+        client = get_qdrant()
         offset = None
         while True:
             pts, next_off = client.scroll(
-                collection_name=COLLECTION_NAME, limit=500, offset=offset,
-                scroll_filter=Filter(must=[
-                    FieldCondition(key="doc_type", match=MatchValue(value="uodo_decision"))
-                ]),
-                with_payload=list(result.keys()), with_vectors=False,
+                collection_name=COLLECTION_NAME,
+                limit=500,
+                offset=offset,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="doc_type", match=MatchValue(value="uodo_decision")
+                        )
+                    ]
+                ),
+                with_payload=dynamic_fields,
+                with_vectors=False,
             )
-            for pt in (pts or []):
+            for pt in pts or []:
                 pay = pt.payload or {}
-                for field in result:
-                    for val in (pay.get(field) or []):
+                for field in dynamic_fields:
+                    for val in pay.get(field) or []:
                         if val and val not in result[field]:
                             result[field].append(val)
             if not next_off or not pts:
                 break
             offset = next_off
-        for field in result:
+        for field in dynamic_fields:
             result[field] = sorted(result[field])
     except Exception:
         pass
@@ -438,51 +628,192 @@ def _doc_key(d: dict[str, Any]) -> str:
 
 
 def hybrid_search(
-    query: str, top_k: int = TOP_K, filters: dict[str, Any] | None = None, use_graph: bool = True
+    query: str,
+    top_k: int = TOP_K,
+    filters: dict[str, Any] | None = None,
+    use_graph: bool = True,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Zwraca (list[dict], list[str]) — dokumenty i użyte tagi."""
+    """Zwraca (list[dict], list[str]) — dokumenty i użyte tagi.
+
+    Priorytety:
+      1. Decyzje UODO — zwracamy WSZYSTKIE pasujące (bez limitu top_k)
+      2. Artykuły u.o.d.o. — max MAX_ACT_DOCS
+      3. Artykuły RODO — max MAX_GDPR_DOCS
+    """
+    MAX_ACT_DOCS = 5
+    MAX_GDPR_DOCS = 3
+
     matched_tags = _get_matched_tags(query)
 
-    seen_keys = set()
-    merged = []
+    seen_keys: set[str] = set()
+    decisions: list[dict[str, Any]] = []
+    act_docs: list[dict[str, Any]] = []
+    gdpr_docs: list[dict[str, Any]] = []
 
-    if matched_tags:
-        # Tagi jako filtr — semantic search zwraca top_k najlepiej pasujących
+    def _add(bucket: list, doc: dict) -> bool:
+        key = _doc_key(doc)
+        if key in seen_keys:
+            return False
+        seen_keys.add(key)
+        bucket.append(doc)
+        return True
+
+    # ── Filtry bazowe bez pola keyword (keyword stosujemy osobno) ─────────
+    filters_base = {k: v for k, v in (filters or {}).items() if k != "keyword"}
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DECYZJE UODO — pełny recall (keyword_exact_search = scroll bez limitu)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # ── 1a. Explicit keyword z UI → scroll po tagu, tylko decyzje ────────
+    explicit_keyword = (filters or {}).get("keyword", "")
+    if explicit_keyword:
+        dec_filters = {**filters_base, "doc_types": ["uodo_decision"]}
+        for d in keyword_exact_search(explicit_keyword, filters=dec_filters):
+            _add(decisions, d)
+
+    # ── 1b. Bezpośrednie frazy z zapytania → scroll po tagu ──────────────
+    # Wyekstrahuj frazy 1- i 2-wyrazowe z query i szukaj ich jako tagów.
+    # Robimy to BEZ LLM, żeby nie dostawać tagów pokrewnych (np. "dane
+    # biometryczne") gdy użytkownik pyta o "dane genetyczne". LLM-tagi
+    # (matched_tags) używamy tylko jako uzupełnienie gdy to nic nie daje.
+    _stopwords = {
+        "jakie",
+        "są",
+        "w",
+        "o",
+        "i",
+        "z",
+        "do",
+        "na",
+        "co",
+        "ile",
+        "jak",
+        "czy",
+        "przez",
+        "dla",
+        "po",
+        "przy",
+        "od",
+        "ze",
+        "to",
+        "a",
+        "że",
+        "się",
+        "nie",
+        "być",
+        "który",
+        "które",
+        "która",
+    }
+    _words = [
+        w.lower()
+        for w in re.split(r"\W+", query)
+        if w.lower() not in _stopwords and len(w) > 2
+    ]
+    # Frazy: pojedyncze słowa + pary sąsiednich słów
+    _direct_phrases: list[str] = list(
+        dict.fromkeys(
+            _words + [f"{_words[i]} {_words[i + 1]}" for i in range(len(_words) - 1)]
+        )
+    )
+    all_tags_lower = {t.lower(): t for t in _get_all_tags()}
+    _direct_hits: list[str] = []
+    for phrase in _direct_phrases:
+        if phrase in all_tags_lower:
+            _direct_hits.append(all_tags_lower[phrase])
+
+    for tag in _direct_hits:
+        dec_filters = {**filters_base, "doc_types": ["uodo_decision"]}
+        for d in keyword_exact_search(tag, filters=dec_filters):
+            _add(decisions, d)
+
+    # ── 1c. Matched tags (LLM) → tylko gdy 1b nic nie znalazło ──────────
+    # Używamy tagów LLM wyłącznie jako fallback — LLM może zwrócić tagi
+    # pokrewne ("dane biometryczne") które zaśmiecają wyniki dla konkretnej frazy.
+    if not decisions and matched_tags:
         for tag in matched_tags:
-            tag_filters = (filters or {}).copy()
-            tag_filters["keyword"] = tag
-            for d in semantic_search(query, top_k=top_k, filters=tag_filters):
-                key = _doc_key(d)
-                if key not in seen_keys:
-                    merged.append(d)
-                    seen_keys.add(key)
-        merged.sort(key=lambda d: -d.get("_score", 0))
+            dec_filters = {**filters_base, "doc_types": ["uodo_decision"]}
+            for d in keyword_exact_search(tag, filters=dec_filters):
+                _add(decisions, d)
 
-    # Semantic search bez filtra tagów — wszystkie typy razem, ranking po score
-    for d in semantic_search(query, top_k=top_k * 2, filters=filters):
-        key = _doc_key(d)
-        if key not in seen_keys:
-            merged.append(d)
-            seen_keys.add(key)
+    # ── 1d. Semantic search — ostatni fallback gdy tagi nic nie dały ─────
+    if len(decisions) < 5:
+        dec_sem_filters = {**filters_base, "doc_types": ["uodo_decision"]}
+        for d in semantic_search(
+            query, top_k=20, filters=dec_sem_filters, score_threshold=0.45
+        ):
+            _add(decisions, d)
 
-    merged.sort(key=lambda d: -d.get("_score", 0))
+    # Posortuj decyzje malejąco po score
+    decisions.sort(key=lambda d: -d.get("_score", 0))
 
-    if not use_graph or not merged:
+    # ═══════════════════════════════════════════════════════════════════════
+    # ARTYKUŁY u.o.d.o. — pomocnicze, max MAX_ACT_DOCS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # Explicit keyword z UI — scroll po tagu
+    if explicit_keyword:
+        act_filters = {**filters_base, "doc_types": ["legal_act_article"]}
+        for d in keyword_exact_search(explicit_keyword, filters=act_filters):
+            if len(act_docs) >= MAX_ACT_DOCS:
+                break
+            _add(act_docs, d)
+
+    if len(act_docs) < MAX_ACT_DOCS:
+        act_sem_filters = {**filters_base, "doc_types": ["legal_act_article"]}
+        for d in semantic_search(
+            query,
+            top_k=MAX_ACT_DOCS - len(act_docs),
+            filters=act_sem_filters,
+            score_threshold=0.25,
+        ):
+            if len(act_docs) >= MAX_ACT_DOCS:
+                break
+            _add(act_docs, d)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ARTYKUŁY RODO — kontekst prawny, max MAX_GDPR_DOCS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    if explicit_keyword:
+        gdpr_filters = {
+            **filters_base,
+            "doc_types": ["gdpr_article", "gdpr_recital"],
+        }
+        for d in keyword_exact_search(explicit_keyword, filters=gdpr_filters):
+            if len(gdpr_docs) >= MAX_GDPR_DOCS:
+                break
+            _add(gdpr_docs, d)
+
+    if len(gdpr_docs) < MAX_GDPR_DOCS:
+        gdpr_sem_filters = {
+            **filters_base,
+            "doc_types": ["gdpr_article", "gdpr_recital"],
+        }
+        for d in semantic_search(
+            query,
+            top_k=MAX_GDPR_DOCS - len(gdpr_docs),
+            filters=gdpr_sem_filters,
+            score_threshold=0.3,
+        ):
+            if len(gdpr_docs) >= MAX_GDPR_DOCS:
+                break
+            _add(gdpr_docs, d)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Złącz: decyzje pierwsze, potem u.o.d.o., potem RODO
+    # ═══════════════════════════════════════════════════════════════════════
+    merged = decisions + act_docs + gdpr_docs
+
+    if not use_graph or not decisions:
         return merged, matched_tags
 
-    # Graf rozszerza tylko orzeczenia UODO
-    seed_sigs = [
-        d.get("signature", "")
-        for d in merged
-        if d.get("doc_type") == "uodo_decision" and d.get("signature")
-    ]
+    # ── Graf — rozszerza tylko decyzje UODO ──────────────────────────────
+    seed_sigs = [d.get("signature", "") for d in decisions if d.get("signature")]
     if seed_sigs:
         expanded = graph_expand(seed_sigs)
-        seen_graph = {
-            d.get("signature", "")
-            for d in merged
-            if d.get("doc_type") == "uodo_decision"
-        }
+        seen_graph = {d.get("signature", "") for d in decisions}
         for sig, rel_type, score in expanded:
             if sig in seen_graph:
                 continue
@@ -490,8 +821,10 @@ def hybrid_search(
             if doc:
                 doc["_score"] = score
                 doc["_graph_relation"] = rel_type
-                merged.append(doc)
+                decisions.append(doc)
                 seen_graph.add(sig)
+        # Odbuduj merged po rozszerzeniu grafu
+        merged = decisions + act_docs + gdpr_docs
 
     return merged, matched_tags
 
@@ -499,7 +832,10 @@ def hybrid_search(
 # ─────────────────────────── LLM ─────────────────────────────────
 
 
-def _extract_fragment(content: str, query: str, max_len: int = 1200) -> str:
+# POPRAWKA 2: większy max_len i dokładniejszy krok przeszukiwania okna
+# — poprzednio step=300 mógł minąć okno zawierające szukaną frazę,
+#   szczególnie gdy decyzja jest długa a fraza pojawia się raz, np. na pozycji 2500.
+def _extract_fragment(content: str, query: str, max_len: int = 2000) -> str:
     if not content or len(content) <= max_len:
         return content
     stopwords = {
@@ -530,7 +866,9 @@ def _extract_fragment(content: str, query: str, max_len: int = 1200) -> str:
     ]
     if not keywords:
         return content[:max_len]
-    step = 300
+    step = (
+        150  # było 300 — dokładniejsze przeszukiwanie, mniej szans na pominięcie frazy
+    )
     best_score, best_pos = -1, 0
     cl = content.lower()
     for pos in range(0, max(1, len(content) - max_len), step):
@@ -546,11 +884,33 @@ def _extract_fragment(content: str, query: str, max_len: int = 1200) -> str:
     return fragment
 
 
-def build_context(docs: list[dict[str, Any]], query: str, max_chars: int = 14000,
-                  filters: dict[str, Any] | None = None) -> str:
-    # Opisz aktywne filtry słownie
-    filter_lines = []
+# POPRAWKA 3: priorytetyzacja typów dokumentów w kontekście
+# Kolejność: decyzje UODO → u.o.d.o. → RODO → reszta
+# Bez tej zmiany artykuły RODO (wysoki score semantyczny dla "dane genetyczne")
+# wypełniają limit max_chars zanim trafią decyzje UODO.
+_CONTEXT_TYPE_ORDER = {
+    "uodo_decision": 0,
+    "legal_act_article": 1,
+    "gdpr_article": 2,
+    "gdpr_recital": 3,
+}
+
+
+def build_context(
+    docs: list[dict[str, Any]],
+    query: str,
+    max_chars: int = 18000,
+    filters: dict[str, Any] | None = None,
+    memory: "AgentMemory | None" = None,
+) -> str:
+    """Buduje kontekst dla LLM używając szablonów Jinja2.
+    Wzorzec z lekcji 1.2: Context Engineering — każdy typ dokumentu
+    ma własny szablon co poprawia 'zakotwiczenie uwagi' modelu.
+    Opcjonalnie wzbogaca kontekst o wpisy z pamięci epizodycznej (lekcja 2.1).
+    """
+    # ── Nota o filtrach ──────────────────────────────────────────
     f = filters or {}
+    filter_lines = []
     if f.get("status"):
         filter_lines.append(f"Status decyzji: {f['status']}")
     if f.get("term_decision_type"):
@@ -560,7 +920,9 @@ def build_context(docs: list[dict[str, Any]], query: str, max_chars: int = 14000
     if f.get("term_legal_basis"):
         filter_lines.append(f"Podstawa prawna: {', '.join(f['term_legal_basis'])}")
     if f.get("term_corrective_measure"):
-        filter_lines.append(f"Środek naprawczy: {', '.join(f['term_corrective_measure'])}")
+        filter_lines.append(
+            f"Środek naprawczy: {', '.join(f['term_corrective_measure'])}"
+        )
     if f.get("term_sector"):
         filter_lines.append(f"Sektor: {', '.join(f['term_sector'])}")
     if f.get("keyword"):
@@ -569,68 +931,88 @@ def build_context(docs: list[dict[str, Any]], query: str, max_chars: int = 14000
     filter_note = ""
     if filter_lines:
         filter_note = (
-            "UWAGA: Wyniki zostały zawężone przez użytkownika za pomocą filtrów:\n"
-            + "\n".join(f"  • {line}" for line in filter_lines)
-            + "\nOdpowiadaj z uwzględnieniem tego kontekstu filtrowania.\n"
+            "UWAGA: Wyniki zawężone filtrami: "
+            + "; ".join(filter_lines)
+            + ". Odpowiadaj z uwzględnieniem tego kontekstu.\n"
         )
 
-    parts = [
-        f"Poniżej znajdują się dokumenty powiązane z pytaniem: «{query}»\n"
-        f"Zbiór zawiera DECYZJE UODO oraz ARTYKUŁY ustawy o ochronie danych osobowych.\n"
-        f"{filter_note}"
-        f"Odpowiadaj WYŁĄCZNIE na podstawie poniższych dokumentów. "
-        f"Podawaj sygnatury decyzji [DKN.XXXX] i numery artykułów [Art. X u.o.d.o.].\n"
-    ]
-    chars = 0
-    for i, doc in enumerate(docs, 1):
+    # ── Nota z pamięci epizodycznej ──────────────────────────────
+    memory_note = ""
+    if memory:
+        related = memory.find_related(query)
+        if related:
+            snippets = []
+            for e in related[:2]:
+                sigs = ", ".join(e.top_signatures[:3]) if e.top_signatures else "brak"
+                snippets.append(
+                    f"- Poprzednie pytanie: «{e.query}» → znalezione decyzje: {sigs}"
+                )
+            memory_note = (
+                "KONTEKST Z POPRZEDNICH ANALIZ (tej sesji):\n"
+                + "\n".join(snippets)
+                + "\n"
+            )
+
+    # ── Nagłówek przez Jinja2 ────────────────────────────────────
+    header = _TPL_HEADER.render(
+        query=query,
+        filter_note=filter_note,
+        memory_note=memory_note,
+    )
+    parts = [header]
+    chars = len(header)
+
+    # ── Priorytetyzacja typów: decyzje UODO pierwsze, RODO ostatnie ──────
+    # Bez tego sortowania artykuły RODO (wysoki score semantyczny) wypychają
+    # decyzje UODO poza limit max_chars — duże modele nie widzą wtedy decyzji.
+    docs_sorted = sorted(
+        docs,
+        key=lambda d: (
+            _CONTEXT_TYPE_ORDER.get(d.get("doc_type", ""), 9),
+            -d.get("_score", 0),
+        ),
+    )
+
+    # ── Bloki dokumentów przez Jinja2 ────────────────────────────
+    for i, doc in enumerate(docs_sorted, 1):
         dtype = doc.get("doc_type", "")
-        graph_rel = doc.get("_graph_relation", "")
 
         if dtype == "legal_act_article":
-            art_num = doc.get("article_num", "?")
             chunk_idx = doc.get("chunk_index", 0)
             total = doc.get("chunk_total", 1)
-            text = doc.get("content_text", "")
-            label = f"Art. {art_num}"
-            if total > 1:
-                label += f" (część {chunk_idx + 1}/{total})"
-            block = (
-                f"[{i}] USTAWA o ochronie danych osobowych — {label}\n"
-                f"Źródło: Dz.U. 2019 poz. 1781 (u.o.d.o.)\n"
-                f"Treść:\n{text}\n"
+            suffix = f"(część {chunk_idx + 1}/{total})" if total > 1 else ""
+            block = _TPL_ACT_ARTICLE.render(
+                rank=i,
+                art_num=doc.get("article_num", "?"),
+                label_suffix=suffix,
+                text=doc.get("content_text", ""),
             )
         elif dtype in ("gdpr_article", "gdpr_recital"):
             art_num = doc.get("article_num", "?")
-            text = doc.get("content_text", "")
             prefix = "Motyw" if dtype == "gdpr_recital" else f"Art. {art_num}"
-            block = (
-                f"[{i}] RODO (rozporządzenie 2016/679) — {prefix}\n"
-                f"Źródło: Dz.Urz. UE L 119/1\n"
-                f"Treść:\n{text}\n"
+            block = _TPL_GDPR.render(
+                rank=i,
+                prefix=prefix,
+                text=doc.get("content_text", ""),
             )
         else:
-            sig = doc.get("signature", "?")
-            date = doc.get("date_issued", "")[:7]
-            status = doc.get("status", "")
             keywords = doc.get("keywords_text", "") or ", ".join(
                 doc.get("keywords", [])
             )
-            fragment = _extract_fragment(doc.get("content_text", ""), query)
-            acts = doc.get("related_acts", [])[:4]
-            eu = doc.get("related_eu_acts", [])[:2]
-
-            block = f"[{i}] DECYZJA UODO {sig} ({date}, {status})"
-            if graph_rel:
-                block += f" [powiązana: {graph_rel}]"
-            block += "\n"
-            if keywords:
-                block += f"Tagi: {keywords[:200]}\n"
-            if acts or eu:
-                block += f"Akty: {', '.join((acts + eu)[:5])}\n"
-            block += f"Treść:\n{fragment}\n"
+            acts = doc.get("related_acts", [])[:4] + doc.get("related_eu_acts", [])[:2]
+            block = _TPL_DECISION.render(
+                rank=i,
+                sig=doc.get("signature", "?"),
+                date=doc.get("date_issued", "")[:7],
+                status=doc.get("status", ""),
+                graph_rel=doc.get("_graph_relation", ""),
+                keywords=keywords[:200] if keywords else "",
+                acts=", ".join(acts[:5]) if acts else "",
+                fragment=_extract_fragment(doc.get("content_text", ""), query),
+            )
 
         if chars + len(block) > max_chars:
-            parts.append(f"\n[pominięto {len(docs) - i + 1} dalszych wyników]")
+            parts.append(f"\n[pominięto {len(docs_sorted) - i + 1} dalszych wyników]")
             break
         parts.append(block)
         chars += len(block)
@@ -686,8 +1068,8 @@ def call_llm_stream(
         "Jesteś ekspertem ds. ochrony danych osobowych i prawa RODO. "
         "Pomagasz analizować decyzje Prezesa UODO oraz przepisy ustawy o ochronie danych osobowych. "
         "Odpowiadaj po polsku, precyzyjnie i zwięźle. "
-        "Zawsze powołuj się na konkretne decyzje UODO podając sygnatury [DKN.XXXX.XX.XXXX] "
-        "lub artykuły ustawy [Art. X u.o.d.o.]. "
+        "Zawsze powołuj się na konkretne decyzje UODO podając sygnatury [np. DKN.XXXX.XX.XXXX, ZSOŚS, i in.] "
+        "lub artykuły ustawy [np. Art. X u.o.d.o.]. "
         "Jeśli kontekst nie zawiera odpowiedzi na pytanie, powiedz o tym wprost."
     )
     user = f"Pytanie: {query}\n\nDokumenty:\n{context}"
@@ -739,6 +1121,133 @@ def call_llm_stream(
                     pass
     else:
         yield "❌ Nieznany provider LLM."
+
+
+# ─────────────────────────── REASONING STEP ──────────────────────
+# Wzorzec z lekcji 4.1: LLM dekompozycja pytania PRZED wyszukiwaniem
+
+
+def _call_llm_json(
+    prompt: str,
+    provider: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """Wywołanie LLM z wymaganym wyjściem JSON (bez streamowania)."""
+    import json as _json
+
+    provider = provider or st.session_state.get("llm_provider", DEFAULT_PROVIDER)
+    model = model or st.session_state.get("llm_model", "")
+    api_key = api_key or st.session_state.get("llm_api_key", "")
+    messages = [
+        {
+            "role": "system",
+            "content": "Odpowiadaj WYŁĄCZNIE poprawnym JSON. Bez komentarzy.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        if provider == "Groq":
+            from groq import Groq
+
+            client = Groq(api_key=api_key or GROQ_API_KEY)
+            resp = client.chat.completions.create(  # type: ignore[call-overload]
+                model=model or "",
+                messages=messages,  # type: ignore[arg-type]
+                max_tokens=512,
+                temperature=0.0,
+                response_format={"type": "json_object"},
+            )
+            return _json.loads(resp.choices[0].message.content or "{}")
+        elif provider == "Ollama Cloud":
+            import requests as _req
+
+            resp = _req.post(
+                f"{OLLAMA_CLOUD_URL}/api/chat",
+                headers={"Authorization": f"Bearer {api_key or OLLAMA_CLOUD_API_KEY}"},
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                    "format": "json",
+                },
+                timeout=30,
+            )
+            return _json.loads(resp.json().get("message", {}).get("content", "{}"))
+    except Exception:
+        pass
+    return {}
+
+
+def decompose_query(
+    query: str,
+    provider: str | None = None,
+    model: str | None = None,
+    api_key: str | None = None,
+) -> QueryDecomposition:
+    """Reasoning Step — LLM analizuje pytanie i generuje ustrukturyzowane
+    parametry wyszukiwania. Wzorzec z lekcji 4.1 kursu Software 3.0.
+
+    Dla krótkich/prostych zapytań (< 10 słów) zwraca uproszczoną dekompozycję
+    bez wywołania LLM, żeby nie spowalniać wyszukiwania.
+    """
+    # Szybka ścieżka dla prostych zapytań — nie wywołuj LLM
+    words = query.strip().split()
+    if len(words) <= 3:
+        return QueryDecomposition(
+            original_query=query,
+            enriched_query=query,
+            reasoning="Krótkie zapytanie — bez dekompozycji.",
+        )
+
+    prompt = f"""Jesteś ekspertem prawa ochrony danych osobowych.
+Zanalizuj poniższe pytanie użytkownika i wygeneruj parametry wyszukiwania.
+
+PYTANIE: "{query}"
+
+Zwróć JSON w dokładnie takim formacie (wszystkie pola są wymagane):
+{{
+  "query_type": "szukam_decyzji" | "szukam_przepisu" | "analiza_ogólna" | "pytanie_faktyczne",
+  "search_keywords": ["słowo1", "słowo2"],
+  "gdpr_articles_hint": ["Art. 5", "Art. 83"],
+  "uodo_act_articles_hint": ["Art. 60", "Art. 102"],
+  "year_from_hint": null,
+  "year_to_hint": null,
+  "enriched_query": "rozszerzone zapytanie z synonimami prawnymi",
+  "reasoning": "krótkie uzasadnienie po polsku (1 zdanie)"
+}}
+
+ZASADY:
+- search_keywords: max 5, prawne synonimy (np. "kara" → ["administracyjna kara pieniężna", "sankcja"])
+- enriched_query: rozszerz pytanie o kontekst prawny, nie zmieniaj sensu
+- year_from_hint/year_to_hint: podaj rok tylko jeśli pytanie wyraźnie sugeruje okres
+- artykuły: podaj tylko jeśli jesteś pewien, że są istotne dla pytania"""
+
+    raw = _call_llm_json(prompt, provider=provider, model=model, api_key=api_key)
+    if not raw or "enriched_query" not in raw:
+        return QueryDecomposition(
+            original_query=query,
+            enriched_query=query,
+            reasoning="Dekompozycja niedostępna — używam oryginalnego zapytania.",
+        )
+    try:
+        return QueryDecomposition(
+            original_query=query,
+            query_type=QueryType(raw.get("query_type", "analiza_ogólna")),
+            search_keywords=raw.get("search_keywords", [])[:5],
+            gdpr_articles_hint=raw.get("gdpr_articles_hint", []),
+            uodo_act_articles_hint=raw.get("uodo_act_articles_hint", []),
+            year_from_hint=raw.get("year_from_hint"),
+            year_to_hint=raw.get("year_to_hint"),
+            enriched_query=raw.get("enriched_query", query),
+            reasoning=raw.get("reasoning", ""),
+        )
+    except Exception:
+        return QueryDecomposition(
+            original_query=query,
+            enriched_query=query,
+            reasoning="Błąd parsowania — używam oryginalnego zapytania.",
+        )
 
 
 # ─────────────────────────── STATYSTYKI ──────────────────────────
@@ -830,7 +1339,7 @@ def render_act_article_card(doc: dict[str, Any], rank: int):
         <h2><a href="{ISAP_ACT_URL}" target="_blank">Dz.U. 2019 poz. 1781</a>
           <span class="status-badge status-final ms-2">u.o.d.o.</span>
         </h2>
-        <p>{text}{'…' if len(doc.get('content_text',''))>600 else ''}</p>
+        <p>{text}{"…" if len(doc.get("content_text", "")) > 600 else ""}</p>
       </main>
       <footer>
         <small class="text-muted">score: {score:.3f}</small>
@@ -841,20 +1350,20 @@ def render_act_article_card(doc: dict[str, Any], rank: int):
 
 def render_decision_card(doc: dict[str, Any], rank: int):
     """Karta dla decyzji UODO."""
-    sig       = doc.get("signature", "?")
-    status    = doc.get("status", "")
-    date      = doc.get("date_published", "") or doc.get("date_issued", "")
-    source    = doc.get("_source", "")
+    sig = doc.get("signature", "?")
+    status = doc.get("status", "")
+    date = doc.get("date_published", "") or doc.get("date_issued", "")
+    source = doc.get("_source", "")
     graph_rel = doc.get("_graph_relation", "")
-    title     = doc.get("title_full", "") or doc.get("title", "")
-    name      = doc.get("title", sig)
-    url       = decision_url(doc)
+    title = doc.get("title_full", "") or doc.get("title", "")
+    name = doc.get("title", sig)
+    url = decision_url(doc)
 
     kw_list = doc.get("keywords", [])
     if isinstance(kw_list, str):
         kw_list = [k.strip() for k in kw_list.split(",") if k.strip()]
 
-    kinds   = doc.get("term_decision_type", [])
+    kinds = doc.get("term_decision_type", [])
     sectors = doc.get("term_sector", [])
 
     # Usuń z keywords to, co już wyświetlamy jako kinds/sectors (unikamy duplikatów)
@@ -862,28 +1371,44 @@ def render_decision_card(doc: dict[str, Any], rank: int):
     kw_list = [k for k in kw_list if k.lower() not in taxonomy_values]
 
     status_cls = {
-        "prawomocna":    "status-final",
+        "prawomocna": "status-final",
         "nieprawomocna": "status-nonfinal",
-        "uchylona":      "status-repealed",
+        "uchylona": "status-repealed",
     }.get(status, "status-unknown")
 
     date_fmt = ""
     if date:
         try:
             from datetime import datetime
+
             d = datetime.strptime(date[:10], "%Y-%m-%d")
-            months = ["stycznia","lutego","marca","kwietnia","maja","czerwca",
-                      "lipca","sierpnia","września","października","listopada","grudnia"]
-            date_fmt = f"{d.day} {months[d.month-1]} {d.year}"
+            months = [
+                "stycznia",
+                "lutego",
+                "marca",
+                "kwietnia",
+                "maja",
+                "czerwca",
+                "lipca",
+                "sierpnia",
+                "września",
+                "października",
+                "listopada",
+                "grudnia",
+            ]
+            date_fmt = f"{d.day} {months[d.month - 1]} {d.year}"
         except Exception:
             date_fmt = date[:10]
 
     graph_badge = ""
     if source == "graph":
-        graph_badge = f' <span class="status-badge status-unknown">↗ {graph_rel or "graf"}</span>'
+        graph_badge = (
+            f' <span class="status-badge status-unknown">↗ {graph_rel or "graf"}</span>'
+        )
 
     # ── Nagłówek karty (HTML — styl portalu)
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <article class="doc-list-item">
       <header>
         <a href="{url}" target="_blank">{sig}</a>
@@ -894,17 +1419,19 @@ def render_decision_card(doc: dict[str, Any], rank: int):
           <a href="{url}" target="_blank">{name}</a>
           <span class="status-badge {status_cls}">{status.upper()}{graph_badge}</span>
         </h2>
-        <p class="text-muted">{title[:280] + '…' if len(title) > 280 else title}</p>
+        <p class="text-muted">{title[:280] + "…" if len(title) > 280 else title}</p>
       </main>
-    </article>""", unsafe_allow_html=True)
+    </article>""",
+        unsafe_allow_html=True,
+    )
 
     # ── Footer karty — Streamlit (żeby markdown działał poprawnie)
     with st.container():
         # Słowa kluczowe
         if kw_list:
             shown = kw_list[:8]
-            rest  = len(kw_list) - len(shown)
-            tags  = " · ".join(f"`{k}`" for k in shown)
+            rest = len(kw_list) - len(shown)
+            tags = " · ".join(f"`{k}`" for k in shown)
             suffix = f" *+{rest} więcej*" if rest > 0 else ""
             st.caption(f"🏷️ {tags}{suffix}")
 
@@ -921,13 +1448,13 @@ def render_decision_card(doc: dict[str, Any], rank: int):
 
 def render_gdpr_card(doc: dict[str, Any], rank: int):
     """Karta dla artykułu lub motywy RODO."""
-    art_num       = doc.get("article_num", "?")
-    chunk_idx     = doc.get("chunk_index", 0)
-    total         = doc.get("chunk_total", 1)
-    score         = doc.get("_score", 0)
-    text          = doc.get("content_text", "")[:500]
-    dtype         = doc.get("doc_type", "")
-    chapter       = doc.get("chapter", "")
+    art_num = doc.get("article_num", "?")
+    chunk_idx = doc.get("chunk_index", 0)
+    total = doc.get("chunk_total", 1)
+    score = doc.get("_score", 0)
+    text = doc.get("content_text", "")[:500]
+    dtype = doc.get("doc_type", "")
+    chapter = doc.get("chapter", "")
     chapter_title = doc.get("chapter_title", "")
 
     is_recital = dtype == "gdpr_recital"
@@ -938,7 +1465,9 @@ def render_gdpr_card(doc: dict[str, Any], rank: int):
 
     chapter_html = ""
     if chapter and chapter_title:
-        chapter_html = f'<small class="text-muted">Rozdział {chapter} — {chapter_title}</small>'
+        chapter_html = (
+            f'<small class="text-muted">Rozdział {chapter} — {chapter_title}</small>'
+        )
 
     html = f"""
     <article class="doc-list-item">
@@ -948,7 +1477,7 @@ def render_gdpr_card(doc: dict[str, Any], rank: int):
       </header>
       <main>
         <h2>{chapter_html}</h2>
-        <p>{text}{'…' if len(doc.get("content_text",""))>500 else ''}</p>
+        <p>{text}{"…" if len(doc.get("content_text", "")) > 500 else ""}</p>
       </main>
       <footer>
         <small class="text-muted">score: {score:.3f}</small>
@@ -979,7 +1508,8 @@ def main():
         initial_sidebar_state="collapsed",
     )
 
-    st.markdown("""
+    st.markdown(
+        """
     <style>
         /* ── Red Hat Display — font portalu UODO ── */
         @import url('https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@400;500;600;700;800&display=swap');
@@ -1272,10 +1802,13 @@ def main():
             margin-bottom: 4px;
         }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     # ── Nagłówek portalu ────────────────────────────────────────
-    st.markdown("""
+    st.markdown(
+        """
     <div class="page-header">
       <div class="page-header-inner">
         <div>
@@ -1284,29 +1817,35 @@ def main():
         </div>
       </div>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     # ── Sidebar — opcje techniczne ──────────────────────────────
     with st.sidebar:
         st.markdown("## ⚙️ Opcje")
 
-        provider = st.selectbox("Provider LLM", ["Ollama Cloud", "Groq"],
-                                key="provider_select")
-        api_key = st.text_input("Klucz API", type="password",
-                                value=st.session_state.get("llm_api_key", ""),
-                                key="api_key_input")
+        provider = st.selectbox(
+            "Provider LLM", ["Ollama Cloud", "Groq"], key="provider_select"
+        )
+        api_key = st.text_input(
+            "Klucz API",
+            type="password",
+            value=st.session_state.get("llm_api_key", ""),
+            key="api_key_input",
+        )
 
         models = get_available_models(provider, api_key)
 
-        default_model = DEFAULT_OLLAMA_MODEL if provider == "Ollama Cloud" else DEFAULT_GROQ_MODEL
-        default_idx = next(
-            (i for i, m in enumerate(models) if default_model in m), 0
+        default_model = (
+            DEFAULT_OLLAMA_MODEL if provider == "Ollama Cloud" else DEFAULT_GROQ_MODEL
         )
+        default_idx = next((i for i, m in enumerate(models) if default_model in m), 0)
         selected_model = st.selectbox("Model", models, index=default_idx)
 
         st.session_state["llm_provider"] = provider
-        st.session_state["llm_model"]    = selected_model
-        st.session_state["llm_api_key"]  = api_key
+        st.session_state["llm_model"] = selected_model
+        st.session_state["llm_api_key"] = api_key
 
         st.markdown("---")
         use_graph = st.toggle("Graf powiązań", value=True)
@@ -1327,6 +1866,27 @@ def main():
         except Exception:
             pass
 
+        # ── Historia sesji (pamięć epizodyczna — lekcja 2.1) ─────────────
+        if "agent_memory" in st.session_state:
+            mem: AgentMemory = st.session_state["agent_memory"]
+            if mem.entries:
+                st.markdown("---")
+                st.markdown("### 🧠 Historia sesji")
+                for i, e in enumerate(mem.entries):
+                    short_q = e.query[:40] + ("…" if len(e.query) > 40 else "")
+                    with st.expander(f"{i + 1}. {short_q}", expanded=False):
+                        if e.decomposition_summary:
+                            st.caption(f"_{e.decomposition_summary}_")
+                        if e.top_signatures:
+                            st.caption(
+                                "📋 "
+                                + " · ".join(f"`{s}`" for s in e.top_signatures[:3])
+                            )
+                        if e.top_articles:
+                            st.caption("📜 " + " · ".join(e.top_articles))
+                        if e.answer_snippet:
+                            st.caption(e.answer_snippet[:200] + "…")
+
     # ── Filtry ──────────────────────────────────────────────────
     doc_types = []
     if show_decisions:
@@ -1336,7 +1896,12 @@ def main():
     if show_gdpr:
         doc_types.extend(["gdpr_article", "gdpr_recital"])
     if not doc_types:
-        doc_types = ["uodo_decision", "legal_act_article", "gdpr_article", "gdpr_recital"]
+        doc_types = [
+            "uodo_decision",
+            "legal_act_article",
+            "gdpr_article",
+            "gdpr_recital",
+        ]
 
     taxonomy = _get_taxonomy_options()
 
@@ -1360,55 +1925,106 @@ def main():
     with st.expander("🔽 Filtry zaawansowane", expanded=False):
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
-            st.markdown('<div class="filter-label">Sygnatura</div>', unsafe_allow_html=True)
-            sig_filter = st.text_input("Sygnatura", placeholder="np. DKN.5110",
-                                       label_visibility="collapsed", key="sig_filter")
-            st.markdown('<div class="filter-label">Status</div>', unsafe_allow_html=True)
-            status_filter = st.selectbox(
-                "Status", ["— wszystkie —", "prawomocna", "nieprawomocna", "uchylona"],
-                label_visibility="collapsed", key="status_filter",
+            st.markdown(
+                '<div class="filter-label">Sygnatura</div>', unsafe_allow_html=True
             )
-            st.markdown('<div class="filter-label">Słowa kluczowe</div>', unsafe_allow_html=True)
-            kw_filter = st.text_input(
-                "Słowo kluczowe", placeholder="np. nałożenie kary",
-                label_visibility="collapsed", key="kw_filter",
+            sig_filter = st.text_input(
+                "Sygnatura",
+                placeholder="np. DKN.5110",
+                label_visibility="collapsed",
+                key="sig_filter",
+            )
+            st.markdown(
+                '<div class="filter-label">Status</div>', unsafe_allow_html=True
+            )
+            status_filter = st.selectbox(
+                "Status",
+                ["— wszystkie —", "prawomocna", "nieprawomocna", "uchylona"],
+                label_visibility="collapsed",
+                key="status_filter",
+            )
+            st.markdown(
+                '<div class="filter-label">Słowa kluczowe</div>', unsafe_allow_html=True
+            )
+            all_tags = _get_all_tags()
+            kw_filter = (
+                st.selectbox(
+                    "Słowo kluczowe",
+                    options=[""] + all_tags,
+                    label_visibility="collapsed",
+                    key="kw_filter",
+                )
+                or ""
             )
         with fc2:
-            st.markdown('<div class="filter-label">Rodzaj decyzji</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="filter-label">Rodzaj decyzji</div>', unsafe_allow_html=True
+            )
             tax_decision = st.multiselect(
-                "Rodzaj decyzji", options=taxonomy.get("term_decision_type", []),
-                label_visibility="collapsed", key="tax_decision",
+                "Rodzaj decyzji",
+                options=taxonomy.get("term_decision_type", []),
+                label_visibility="collapsed",
+                key="tax_decision",
             )
-            st.markdown('<div class="filter-label">Środek naprawczy</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="filter-label">Środek naprawczy</div>',
+                unsafe_allow_html=True,
+            )
             tax_measure = st.multiselect(
-                "Środek naprawczy", options=taxonomy.get("term_corrective_measure", []),
-                label_visibility="collapsed", key="tax_measure",
+                "Środek naprawczy",
+                options=taxonomy.get("term_corrective_measure", []),
+                label_visibility="collapsed",
+                key="tax_measure",
             )
-            st.markdown('<div class="filter-label">Podstawa prawna</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="filter-label">Podstawa prawna</div>',
+                unsafe_allow_html=True,
+            )
             tax_legal_basis = st.multiselect(
-                "Podstawa prawna", options=taxonomy.get("term_legal_basis", []),
-                label_visibility="collapsed", key="tax_legal_basis",
+                "Podstawa prawna",
+                options=taxonomy.get("term_legal_basis", []),
+                label_visibility="collapsed",
+                key="tax_legal_basis",
             )
         with fc3:
-            st.markdown('<div class="filter-label">Rodzaj naruszenia</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="filter-label">Rodzaj naruszenia</div>',
+                unsafe_allow_html=True,
+            )
             tax_violation = st.multiselect(
-                "Rodzaj naruszenia", options=taxonomy.get("term_violation_type", []),
-                label_visibility="collapsed", key="tax_violation",
+                "Rodzaj naruszenia",
+                options=taxonomy.get("term_violation_type", []),
+                label_visibility="collapsed",
+                key="tax_violation",
             )
-            st.markdown('<div class="filter-label">Sektor</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="filter-label">Sektor</div>', unsafe_allow_html=True
+            )
             tax_sector = st.multiselect(
-                "Sektor", options=taxonomy.get("term_sector", []),
-                label_visibility="collapsed", key="tax_sector",
+                "Sektor",
+                options=taxonomy.get("term_sector", []),
+                label_visibility="collapsed",
+                key="tax_sector",
             )
-            st.markdown('<div class="filter-label">Data ogłoszenia (od–do)</div>',
-                        unsafe_allow_html=True)
+            st.markdown(
+                '<div class="filter-label">Data ogłoszenia (od–do)</div>',
+                unsafe_allow_html=True,
+            )
             dcol1, dcol2 = st.columns(2)
             with dcol1:
-                date_from = st.text_input("Od", placeholder="2020-01-01",
-                                          label_visibility="collapsed", key="date_from")
+                date_from = st.text_input(
+                    "Od",
+                    placeholder="2020-01-01",
+                    label_visibility="collapsed",
+                    key="date_from",
+                )
             with dcol2:
-                date_to = st.text_input("Do", placeholder="2026-12-31",
-                                        label_visibility="collapsed", key="date_to")
+                date_to = st.text_input(
+                    "Do",
+                    placeholder="2026-12-31",
+                    label_visibility="collapsed",
+                    key="date_to",
+                )
 
     # ── Przykładowe pytania ─────────────────────────────────────
     with st.expander("💡 Przykładowe pytania", expanded=not bool(query)):
@@ -1429,8 +2045,9 @@ def main():
         cols = st.columns(2)
         for idx, (emoji, question) in enumerate(examples):
             col = cols[idx % 2]
-            if col.button(f"{emoji} {question}", key=f"example_{idx}",
-                          use_container_width=True):
+            if col.button(
+                f"{emoji} {question}", key=f"example_{idx}", use_container_width=True
+            ):
                 st.session_state["_example_query"] = question
                 st.rerun()
 
@@ -1466,8 +2083,12 @@ def main():
     if kw_filter.strip():
         filters["keyword"] = kw_filter.strip()
 
+    # ── Inicjalizacja pamięci epizodycznej (lekcja 2.1 Memory Engineering) ──
+    if "agent_memory" not in st.session_state:
+        st.session_state["agent_memory"] = AgentMemory()
+    memory: AgentMemory = st.session_state["agent_memory"]
+
     # ── Wyszukiwanie ────────────────────────────────────────────
-    # Dopasuj zapytanie do sygnatury jeśli podano w osobnym polu
     effective_query = query
     if sig_filter.strip() and not query.strip():
         effective_query = sig_filter.strip()
@@ -1480,9 +2101,49 @@ def main():
         st.session_state["last_query"] = effective_query
         st.session_state["last_filters"] = str(filters)
 
+        # ── Reasoning Step (lekcja 4.1) — dekompozycja PRZED wyszukiwaniem ──
+        decomp: QueryDecomposition | None = None
+        if use_llm and len(effective_query.split()) > 3:
+            with st.spinner("🧠 Analizuję pytanie..."):
+                decomp = decompose_query(effective_query)
+            if decomp and decomp.reasoning:
+                with st.expander(
+                    "🧠 Reasoning Step — jak zrozumiałem pytanie", expanded=False
+                ):
+                    st.caption(f"**Typ zapytania:** {decomp.query_type.value}")
+                    st.caption(f"**Rozumowanie:** {decomp.reasoning}")
+                    if decomp.search_keywords:
+                        st.caption(
+                            "**Słowa kluczowe:** "
+                            + " · ".join(f"`{k}`" for k in decomp.search_keywords)
+                        )
+                    if decomp.gdpr_articles_hint:
+                        st.caption(
+                            "**Wskazane artykuły RODO:** "
+                            + ", ".join(decomp.gdpr_articles_hint)
+                        )
+                    if decomp.uodo_act_articles_hint:
+                        st.caption(
+                            "**Wskazane artykuły u.o.d.o.:** "
+                            + ", ".join(decomp.uodo_act_articles_hint)
+                        )
+                    if decomp.enriched_query != effective_query:
+                        st.caption(
+                            f"**Wzbogacone zapytanie:** _{decomp.enriched_query}_"
+                        )
+
+        # Użyj enriched_query do wyszukiwania jeśli dekompozycja zadziałała
+        search_query = decomp.enriched_query if decomp else effective_query
+
+        # Wzbogać filtry o podpowiedzi z dekompozycji
+        if decomp and decomp.year_from_hint and "year_from" not in filters:
+            filters["year_from"] = decomp.year_from_hint
+        if decomp and decomp.year_to_hint and "year_to" not in filters:
+            filters["year_to"] = decomp.year_to_hint
+
         with st.spinner("🔍 Wyszukuję..."):
             t0 = time.time()
-            _tags = []
+            _tags: list[str] = []
             sig_match = _RE_QUERY_SIG.match(effective_query)
             if sig_match:
                 sig_norm = sig_match.group(1).upper()
@@ -1503,21 +2164,28 @@ def main():
                         f"Nie znaleziono decyzji o sygnaturze **{sig_norm}** w bazie."
                     )
                     docs, _tags = hybrid_search(
-                        effective_query, top_k=TOP_K, filters=filters, use_graph=use_graph
+                        search_query,
+                        top_k=TOP_K,
+                        filters=filters,
+                        use_graph=use_graph,
                     )
             else:
                 docs, _tags = hybrid_search(
-                    effective_query, top_k=TOP_K, filters=filters, use_graph=use_graph
+                    search_query, top_k=TOP_K, filters=filters, use_graph=use_graph
                 )
             search_time = time.time() - t0
 
         if not docs:
-            st.warning("Nie znaleziono dokumentów. Spróbuj zmienić filtry lub sformułowanie.")
+            st.warning(
+                "Nie znaleziono dokumentów. Spróbuj zmienić filtry lub sformułowanie."
+            )
             return
 
-        decisions  = [d for d in docs if d.get("doc_type") == "uodo_decision"]
-        act_arts   = [d for d in docs if d.get("doc_type") == "legal_act_article"]
-        gdpr_docs  = [d for d in docs if d.get("doc_type") in ("gdpr_article", "gdpr_recital")]
+        decisions = [d for d in docs if d.get("doc_type") == "uodo_decision"]
+        act_arts = [d for d in docs if d.get("doc_type") == "legal_act_article"]
+        gdpr_docs = [
+            d for d in docs if d.get("doc_type") in ("gdpr_article", "gdpr_recital")
+        ]
         graph_docs = [d for d in docs if d.get("_source") == "graph"]
 
         _tag_info = f" · tag: `{kw_filter}`" if kw_filter.strip() else ""
@@ -1528,12 +2196,12 @@ def main():
             + _tag_info
         )
         if _tags:
-            st.caption(
-                "🏷️ Tagi użyte do wyszukiwania: " + " · ".join(f"`{t}`" for t in _tags)
-            )
+            st.caption("🏷️ Tagi: " + " · ".join(f"`{t}`" for t in _tags))
 
         if use_llm:
-            context = build_context(docs, effective_query, filters=filters)
+            context = build_context(
+                docs, effective_query, filters=filters, memory=memory
+            )
             st.markdown("### 💬 Odpowiedź AI")
             answer_placeholder = st.empty()
             full_answer = ""
@@ -1547,14 +2215,37 @@ def main():
             except Exception as e:
                 st.error(f"Błąd LLM: {e}")
 
+            # ── Zapisz do pamięci epizodycznej (lekcja 2.1) ─────────────────
+            if full_answer:
+                top_sigs = [
+                    d.get("signature", "") for d in decisions[:5] if d.get("signature")
+                ]
+                top_arts = [
+                    f"Art. {d.get('article_num')}"
+                    for d in act_arts[:3]
+                    if d.get("article_num")
+                ]
+                memory.add(
+                    MemoryEntry(
+                        query=effective_query,
+                        enriched_query=search_query,
+                        decomposition_summary=decomp.reasoning if decomp else "",
+                        top_signatures=top_sigs,
+                        top_articles=top_arts,
+                        answer_snippet=full_answer[:300],
+                    )
+                )
+
         st.markdown(f"### 📋 Dokumenty ({len(docs)})")
-        tabs = st.tabs([
-            f"Wszystkie ({len(docs)})",
-            f"Decyzje UODO ({len(decisions)})",
-            f"Ustawa u.o.d.o. ({len(act_arts)})",
-            f"RODO ({len(gdpr_docs)})",
-            f"Graf ({len(graph_docs)})",
-        ])
+        tabs = st.tabs(
+            [
+                f"Wszystkie ({len(docs)})",
+                f"Decyzje UODO ({len(decisions)})",
+                f"Ustawa u.o.d.o. ({len(act_arts)})",
+                f"RODO ({len(gdpr_docs)})",
+                f"Graf ({len(graph_docs)})",
+            ]
+        )
 
         with tabs[0]:
             for i, doc in enumerate(docs, 1):
