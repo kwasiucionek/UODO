@@ -6,7 +6,6 @@ import re
 from typing import Any
 
 import streamlit as st
-
 from config import GDPR_URL, ISAP_ACT_URL, UODO_PORTAL_BASE
 from models import (
     CONTEXT_TYPE_ORDER,
@@ -209,6 +208,25 @@ UODO_CSS = """
     .filter-label {
         font-size: 0.78rem; font-weight: 700; color: var(--uodo-blue-80);
         text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+    }
+
+    /* ── Metryki w sidebarze ── */
+    [data-testid="stSidebar"] [data-testid="stMetric"] label,
+    [data-testid="stSidebar"] [data-testid="stMetric"] [data-testid="stMetricLabel"] p {
+        color: #c5d3e8 !important;
+        font-size: 0.78rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stMetric"] [data-testid="stMetricValue"],
+    [data-testid="stSidebar"] [data-testid="stMetric"] [data-testid="stMetricValue"] p {
+        color: #ffffff !important;
+        font-size: 1.4rem !important;
+        font-weight: 700 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stMetric"] {
+        background-color: rgba(255, 255, 255, 0.08);
+        border-radius: 4px;
+        padding: 6px 10px;
+        margin-bottom: 6px;
     }
 </style>
 """
