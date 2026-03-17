@@ -3,7 +3,7 @@
 UODO RAG Demo — wyszukiwarka decyzji Prezesa UODO + ustawa o ochronie danych osobowych.
 
 Uruchomienie:
-  streamlit run uodo_app.py
+  streamlit run main.py
 
 Wymagania:
   pip install streamlit qdrant-client sentence-transformers networkx groq requests python-dotenv
@@ -16,8 +16,8 @@ import streamlit as st
 from config import (
     DEFAULT_GROQ_MODEL,
     DEFAULT_OLLAMA_MODEL,
+    OLLAMA_URL,
     RE_QUERY_SIG,
-    TAXONOMY_STATIC,
 )
 from llm import call_llm_stream, decompose_query, get_available_models
 from models import AgentMemory, MemoryEntry, QueryDecomposition
@@ -53,33 +53,35 @@ def main() -> None:
     with st.sidebar:
         st.markdown("## ⚙️ Opcje")
 
-        provider = st.selectbox(
-            "Provider LLM", ["Ollama Cloud", "Groq"], key="provider_select"
-        )
-        api_key = st.text_input(
-            "Klucz API",
-            type="password",
-            value=st.session_state.get("llm_api_key", ""),
-            key="api_key_input",
-        )
-        models = get_available_models(provider, api_key)
-        default_model = (
-            DEFAULT_OLLAMA_MODEL if provider == "Ollama Cloud" else DEFAULT_GROQ_MODEL
-        )
-        default_idx = next((i for i, m in enumerate(models) if default_model in m), 0)
+        provider = st.selectbox("Provider LLM", ["Ollama", "Groq"], key="provider_select")
+
+        # Klucz API tylko dla Groq — Ollama używa OLLAMA_CLOUD_API_KEY z .env
+        if provider == "Groq":
+            api_key = st.text_input(
+                "Klucz API Groq", type="password",
+                value=st.session_state.get("llm_api_key", ""),
+                key="api_key_input",
+            )
+        else:
+            api_key = ""
+            st.caption(f"🖥️ Ollama: `{OLLAMA_URL}`")
+
+        models        = get_available_models(provider, api_key)
+        default_model = DEFAULT_OLLAMA_MODEL if provider == "Ollama" else DEFAULT_GROQ_MODEL
+        default_idx   = next((i for i, m in enumerate(models) if default_model in m), 0)
         selected_model = st.selectbox("Model", models, index=default_idx)
 
         st.session_state["llm_provider"] = provider
-        st.session_state["llm_model"] = selected_model
-        st.session_state["llm_api_key"] = api_key
+        st.session_state["llm_model"]    = selected_model
+        st.session_state["llm_api_key"]  = api_key
 
         st.markdown("---")
         use_graph = st.toggle("Graf powiązań", value=True)
 
         st.markdown("### 📂 Typ dokumentów")
         show_decisions = st.checkbox("Decyzje UODO", value=True)
-        show_act = st.checkbox("Ustawa o ochronie danych (u.o.d.o.)", value=True)
-        show_gdpr = st.checkbox("RODO (rozporządzenie UE 2016/679)", value=True)
+        show_act       = st.checkbox("Ustawa o ochronie danych (u.o.d.o.)", value=True)
+        show_gdpr      = st.checkbox("RODO (rozporządzenie UE 2016/679)", value=True)
 
         st.markdown("---")
         try:
@@ -104,10 +106,7 @@ def main() -> None:
                         if e.decomposition_summary:
                             st.caption(f"_{e.decomposition_summary}_")
                         if e.top_signatures:
-                            st.caption(
-                                "📋 "
-                                + " · ".join(f"`{s}`" for s in e.top_signatures[:3])
-                            )
+                            st.caption("📋 " + " · ".join(f"`{s}`" for s in e.top_signatures[:3]))
                         if e.top_articles:
                             st.caption("📜 " + " · ".join(e.top_articles))
                         if e.answer_snippet:
@@ -122,12 +121,7 @@ def main() -> None:
     if show_gdpr:
         doc_types.extend(["gdpr_article", "gdpr_recital"])
     if not doc_types:
-        doc_types = [
-            "uodo_decision",
-            "legal_act_article",
-            "gdpr_article",
-            "gdpr_recital",
-        ]
+        doc_types = ["uodo_decision", "legal_act_article", "gdpr_article", "gdpr_recital"]
 
     taxonomy = get_taxonomy_options()
 
@@ -138,10 +132,8 @@ def main() -> None:
     col_q, col_ai, col_btn = st.columns([7, 1.5, 1.2])
     with col_q:
         query = st.text_input(
-            "Treść",
-            placeholder="Wpisz treść, sygnaturę lub temat...",
-            key="query_input",
-            label_visibility="collapsed",
+            "Treść", placeholder="Wpisz treść, sygnaturę lub temat...",
+            key="query_input", label_visibility="collapsed",
         )
     with col_ai:
         use_llm = st.checkbox("🤖 Użyj AI", value=True, key="use_llm_cb")
@@ -152,105 +144,60 @@ def main() -> None:
     with st.expander("🔽 Filtry zaawansowane", expanded=False):
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
-            st.markdown(
-                '<div class="filter-label">Sygnatura</div>', unsafe_allow_html=True
-            )
+            st.markdown('<div class="filter-label">Sygnatura</div>', unsafe_allow_html=True)
             sig_filter = st.text_input(
-                "Sygnatura",
-                placeholder="np. DKN.5110",
-                label_visibility="collapsed",
-                key="sig_filter",
+                "Sygnatura", placeholder="np. DKN.5110",
+                label_visibility="collapsed", key="sig_filter",
             )
-            st.markdown(
-                '<div class="filter-label">Status</div>', unsafe_allow_html=True
-            )
+            st.markdown('<div class="filter-label">Status</div>', unsafe_allow_html=True)
             status_filter = st.selectbox(
-                "Status",
-                ["— wszystkie —", "prawomocna", "nieprawomocna", "uchylona"],
-                label_visibility="collapsed",
-                key="status_filter",
+                "Status", ["— wszystkie —", "prawomocna", "nieprawomocna", "uchylona"],
+                label_visibility="collapsed", key="status_filter",
             )
-            st.markdown(
-                '<div class="filter-label">Słowa kluczowe</div>', unsafe_allow_html=True
-            )
-            all_tags = get_all_tags()
-            kw_filter = (
-                st.selectbox(
-                    "Słowo kluczowe",
-                    options=[""] + all_tags,
-                    label_visibility="collapsed",
-                    key="kw_filter",
-                )
-                or ""
-            )
+            st.markdown('<div class="filter-label">Słowa kluczowe</div>', unsafe_allow_html=True)
+            all_tags  = get_all_tags()
+            kw_filter = st.selectbox(
+                "Słowo kluczowe", options=[""] + all_tags,
+                label_visibility="collapsed", key="kw_filter",
+            ) or ""
         with fc2:
-            st.markdown(
-                '<div class="filter-label">Rodzaj decyzji</div>', unsafe_allow_html=True
-            )
+            st.markdown('<div class="filter-label">Rodzaj decyzji</div>', unsafe_allow_html=True)
             tax_decision = st.multiselect(
-                "Rodzaj decyzji",
-                options=taxonomy.get("term_decision_type", []),
-                label_visibility="collapsed",
-                key="tax_decision",
+                "Rodzaj decyzji", options=taxonomy.get("term_decision_type", []),
+                label_visibility="collapsed", key="tax_decision",
             )
-            st.markdown(
-                '<div class="filter-label">Środek naprawczy</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown('<div class="filter-label">Środek naprawczy</div>', unsafe_allow_html=True)
             tax_measure = st.multiselect(
-                "Środek naprawczy",
-                options=taxonomy.get("term_corrective_measure", []),
-                label_visibility="collapsed",
-                key="tax_measure",
+                "Środek naprawczy", options=taxonomy.get("term_corrective_measure", []),
+                label_visibility="collapsed", key="tax_measure",
             )
-            st.markdown(
-                '<div class="filter-label">Podstawa prawna</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown('<div class="filter-label">Podstawa prawna</div>', unsafe_allow_html=True)
             tax_legal_basis = st.multiselect(
-                "Podstawa prawna",
-                options=taxonomy.get("term_legal_basis", []),
-                label_visibility="collapsed",
-                key="tax_legal_basis",
+                "Podstawa prawna", options=taxonomy.get("term_legal_basis", []),
+                label_visibility="collapsed", key="tax_legal_basis",
             )
         with fc3:
-            st.markdown(
-                '<div class="filter-label">Rodzaj naruszenia</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown('<div class="filter-label">Rodzaj naruszenia</div>', unsafe_allow_html=True)
             tax_violation = st.multiselect(
-                "Rodzaj naruszenia",
-                options=taxonomy.get("term_violation_type", []),
-                label_visibility="collapsed",
-                key="tax_violation",
+                "Rodzaj naruszenia", options=taxonomy.get("term_violation_type", []),
+                label_visibility="collapsed", key="tax_violation",
             )
-            st.markdown(
-                '<div class="filter-label">Sektor</div>', unsafe_allow_html=True
-            )
+            st.markdown('<div class="filter-label">Sektor</div>', unsafe_allow_html=True)
             tax_sector = st.multiselect(
-                "Sektor",
-                options=taxonomy.get("term_sector", []),
-                label_visibility="collapsed",
-                key="tax_sector",
+                "Sektor", options=taxonomy.get("term_sector", []),
+                label_visibility="collapsed", key="tax_sector",
             )
-            st.markdown(
-                '<div class="filter-label">Data ogłoszenia (od–do)</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown('<div class="filter-label">Data ogłoszenia (od–do)</div>', unsafe_allow_html=True)
             dcol1, dcol2 = st.columns(2)
             with dcol1:
                 date_from = st.text_input(
-                    "Od",
-                    placeholder="2020-01-01",
-                    label_visibility="collapsed",
-                    key="date_from",
+                    "Od", placeholder="2020-01-01",
+                    label_visibility="collapsed", key="date_from",
                 )
             with dcol2:
                 date_to = st.text_input(
-                    "Do",
-                    placeholder="2026-12-31",
-                    label_visibility="collapsed",
-                    key="date_to",
+                    "Do", placeholder="2026-12-31",
+                    label_visibility="collapsed", key="date_to",
                 )
 
     # ── Przykładowe pytania ──────────────────────────────────────
@@ -320,7 +267,7 @@ def main() -> None:
         or st.session_state.get("last_query") != effective_query
         or st.session_state.get("last_filters") != str(filters)
     ):
-        st.session_state["last_query"] = effective_query
+        st.session_state["last_query"]   = effective_query
         st.session_state["last_filters"] = str(filters)
 
         # Reasoning Step — dekompozycja PRZED wyszukiwaniem
@@ -329,30 +276,17 @@ def main() -> None:
             with st.spinner("🧠 Analizuję pytanie..."):
                 decomp = decompose_query(effective_query)
             if decomp and decomp.reasoning:
-                with st.expander(
-                    "🧠 Reasoning Step — jak zrozumiałem pytanie", expanded=False
-                ):
+                with st.expander("🧠 Reasoning Step — jak zrozumiałem pytanie", expanded=False):
                     st.caption(f"**Typ zapytania:** {decomp.query_type.value}")
                     st.caption(f"**Rozumowanie:** {decomp.reasoning}")
                     if decomp.search_keywords:
-                        st.caption(
-                            "**Słowa kluczowe:** "
-                            + " · ".join(f"`{k}`" for k in decomp.search_keywords)
-                        )
+                        st.caption("**Słowa kluczowe:** " + " · ".join(f"`{k}`" for k in decomp.search_keywords))
                     if decomp.gdpr_articles_hint:
-                        st.caption(
-                            "**Wskazane artykuły RODO:** "
-                            + ", ".join(decomp.gdpr_articles_hint)
-                        )
+                        st.caption("**Wskazane artykuły RODO:** " + ", ".join(decomp.gdpr_articles_hint))
                     if decomp.uodo_act_articles_hint:
-                        st.caption(
-                            "**Wskazane artykuły u.o.d.o.:** "
-                            + ", ".join(decomp.uodo_act_articles_hint)
-                        )
+                        st.caption("**Wskazane artykuły u.o.d.o.:** " + ", ".join(decomp.uodo_act_articles_hint))
                     if decomp.enriched_query != effective_query:
-                        st.caption(
-                            f"**Wzbogacone zapytanie:** _{decomp.enriched_query}_"
-                        )
+                        st.caption(f"**Wzbogacone zapytanie:** _{decomp.enriched_query}_")
 
         search_query = decomp.enriched_query if decomp else effective_query
         if decomp and decomp.year_from_hint and "year_from" not in filters:
@@ -369,39 +303,29 @@ def main() -> None:
                 exact = fetch_by_signature(sig_norm)
                 if exact:
                     exact["_source"] = "exact"
-                    exact["_score"] = 1.0
+                    exact["_score"]  = 1.0
                     docs = [exact]
                     if use_graph:
                         for rsig in exact.get("related_uodo_rulings", [])[:5]:
                             rdoc = fetch_by_signature(rsig)
                             if rdoc:
                                 rdoc["_source"] = "graph"
-                                rdoc["_score"] = 0.9
+                                rdoc["_score"]  = 0.9
                                 docs.append(rdoc)
                 else:
-                    st.warning(
-                        f"Nie znaleziono decyzji o sygnaturze **{sig_norm}** w bazie."
-                    )
-                    docs, _tags = hybrid_search(
-                        search_query, filters=filters, use_graph=use_graph
-                    )
+                    st.warning(f"Nie znaleziono decyzji o sygnaturze **{sig_norm}** w bazie.")
+                    docs, _tags = hybrid_search(search_query, filters=filters, use_graph=use_graph)
             else:
-                docs, _tags = hybrid_search(
-                    search_query, filters=filters, use_graph=use_graph
-                )
+                docs, _tags = hybrid_search(search_query, filters=filters, use_graph=use_graph)
             search_time = time.time() - t0
 
         if not docs:
-            st.warning(
-                "Nie znaleziono dokumentów. Spróbuj zmienić filtry lub sformułowanie."
-            )
+            st.warning("Nie znaleziono dokumentów. Spróbuj zmienić filtry lub sformułowanie.")
             return
 
-        decisions = [d for d in docs if d.get("doc_type") == "uodo_decision"]
-        act_arts = [d for d in docs if d.get("doc_type") == "legal_act_article"]
-        gdpr_docs = [
-            d for d in docs if d.get("doc_type") in ("gdpr_article", "gdpr_recital")
-        ]
+        decisions  = [d for d in docs if d.get("doc_type") == "uodo_decision"]
+        act_arts   = [d for d in docs if d.get("doc_type") == "legal_act_article"]
+        gdpr_docs  = [d for d in docs if d.get("doc_type") in ("gdpr_article", "gdpr_recital")]
         graph_docs = [d for d in docs if d.get("_source") == "graph"]
 
         _tag_info = f" · tag: `{kw_filter}`" if kw_filter.strip() else ""
@@ -415,9 +339,7 @@ def main() -> None:
             st.caption("🏷️ Tagi: " + " · ".join(f"`{t}`" for t in _tags))
 
         if use_llm:
-            context = build_context(
-                docs, effective_query, filters=filters, memory=memory
-            )
+            context = build_context(docs, effective_query, filters=filters, memory=memory)
             st.markdown("### 💬 Odpowiedź AI")
             answer_placeholder = st.empty()
             full_answer = ""
@@ -432,35 +354,23 @@ def main() -> None:
                 st.error(f"Błąd LLM: {e}")
 
             if full_answer:
-                memory.add(
-                    MemoryEntry(
-                        query=effective_query,
-                        enriched_query=search_query,
-                        decomposition_summary=decomp.reasoning if decomp else "",
-                        top_signatures=[
-                            d.get("signature", "")
-                            for d in decisions[:5]
-                            if d.get("signature")
-                        ],
-                        top_articles=[
-                            f"Art. {d.get('article_num')}"
-                            for d in act_arts[:3]
-                            if d.get("article_num")
-                        ],
-                        answer_snippet=full_answer[:300],
-                    )
-                )
+                memory.add(MemoryEntry(
+                    query=effective_query,
+                    enriched_query=search_query,
+                    decomposition_summary=decomp.reasoning if decomp else "",
+                    top_signatures=[d.get("signature", "") for d in decisions[:5] if d.get("signature")],
+                    top_articles=[f"Art. {d.get('article_num')}" for d in act_arts[:3] if d.get("article_num")],
+                    answer_snippet=full_answer[:300],
+                ))
 
         st.markdown(f"### 📋 Dokumenty ({len(docs)})")
-        tabs = st.tabs(
-            [
-                f"Wszystkie ({len(docs)})",
-                f"Decyzje UODO ({len(decisions)})",
-                f"Ustawa u.o.d.o. ({len(act_arts)})",
-                f"RODO ({len(gdpr_docs)})",
-                f"Graf ({len(graph_docs)})",
-            ]
-        )
+        tabs = st.tabs([
+            f"Wszystkie ({len(docs)})",
+            f"Decyzje UODO ({len(decisions)})",
+            f"Ustawa u.o.d.o. ({len(act_arts)})",
+            f"RODO ({len(gdpr_docs)})",
+            f"Graf ({len(graph_docs)})",
+        ])
 
         with tabs[0]:
             for i, doc in enumerate(docs, 1):

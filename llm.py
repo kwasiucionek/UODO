@@ -1,6 +1,15 @@
 """
 Wywołania LLM — streaming, JSON, dekompozycja zapytania, lista modeli.
 
+Obsługiwani providerzy:
+  - Ollama — lokalny daemon (domyślnie http://localhost:11434).
+             Modele cloud (np. "gpt-oss:120b-cloud") wymagają OLLAMA_CLOUD_API_KEY
+             przekazywanego jako nagłówek Authorization — daemon używa go do
+             uwierzytelnienia przy pobieraniu i uruchamianiu modeli z chmury.
+             Modele lokalne (np. "gemma3") działają bez klucza, ale nagłówek
+             i tak jest wysyłany — Ollama go po prostu ignoruje.
+  - Groq   — zewnętrzne API (api.groq.com), wymaga GROQ_API_KEY.
+
 LLM analizuje pytanie PRZED wyszukiwaniem zamiast szukać surowej frazy.
 """
 
@@ -8,15 +17,18 @@ import json as _json
 from collections.abc import Generator
 from typing import Any
 
+import requests as _req
 import streamlit as st
 
 from config import (
+    DEFAULT_OLLAMA_MODEL,
     DEFAULT_PROVIDER,
     GROQ_API_KEY,
     OLLAMA_CLOUD_API_KEY,
-    OLLAMA_CLOUD_URL,
+    OLLAMA_URL,
 )
 from models import QueryDecomposition, QueryType
+
 
 # ─────────────────────────── LISTA MODELI ────────────────────────
 
@@ -27,7 +39,6 @@ def get_available_models(provider: str, api_key: str | None = None) -> list[str]
     if provider == "Groq":
         try:
             from groq import Groq
-
             client = Groq(api_key=api_key or GROQ_API_KEY)
             ids = sorted(
                 m.id
@@ -35,28 +46,31 @@ def get_available_models(provider: str, api_key: str | None = None) -> list[str]
                 if not any(x in m.id for x in ("whisper", "tts", "playai", "distil"))
             )
             return ids or ["llama-3.3-70b-versatile"]
-        except Exception as e:
-            st.warning(f"Nie udało się pobrać modeli Groq: {e}")
+        except Exception:
             return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
-    # Ollama Cloud
+    # Ollama — zawsze localhost, klucz cloud w nagłówku
     try:
-        import requests as _req
-
         r = _req.get(
-            f"{OLLAMA_CLOUD_URL}/api/tags",
-            headers={"Authorization": f"Bearer {api_key or OLLAMA_CLOUD_API_KEY}"},
-            timeout=10,
+            f"{OLLAMA_URL}/api/tags",
+            headers=_ollama_headers(),
+            timeout=5,
         )
         r.raise_for_status()
         models = [m.get("name") for m in r.json().get("models", []) if m.get("name")]
-        return sorted(models) or ["qwen3:14b"]
-    except Exception as e:
-        st.warning(f"Nie udało się pobrać modeli Ollama Cloud: {e}")
-        return ["qwen3:14b", "llama3.3:70b", "bielik:11b-v3"]
+        return sorted(models) or [DEFAULT_OLLAMA_MODEL]
+    except Exception:
+        return [DEFAULT_OLLAMA_MODEL]
 
 
-# ─────────────────────────── WYWOŁANIA LLM ───────────────────────
+# ─────────────────────────── HELPERS ─────────────────────────────
+
+
+def _ollama_headers() -> dict[str, str]:
+    """Nagłówki dla każdego wywołania Ollama — klucz cloud jest zawsze wysyłany.
+    Dla modeli czysto lokalnych Ollama ignoruje nagłówek Authorization.
+    """
+    return {"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}"} if OLLAMA_CLOUD_API_KEY else {}
 
 
 def _get_llm_params(
@@ -65,9 +79,12 @@ def _get_llm_params(
     """Zwraca (provider, model, api_key) — z session_state jeśli nie podano."""
     return (
         provider or st.session_state.get("llm_provider", DEFAULT_PROVIDER),
-        model or st.session_state.get("llm_model", ""),
-        api_key or st.session_state.get("llm_api_key", ""),
+        model    or st.session_state.get("llm_model", ""),
+        api_key  or st.session_state.get("llm_api_key", ""),
     )
+
+
+# ─────────────────────────── WYWOŁANIA LLM ───────────────────────
 
 
 def call_llm_stream(
@@ -77,7 +94,7 @@ def call_llm_stream(
     model: str | None = None,
     api_key: str | None = None,
 ) -> Generator[str, Any, None]:
-    """Stream odpowiedzi z Groq lub Ollama Cloud."""
+    """Stream odpowiedzi z Ollama (localhost) lub Groq."""
     provider, model, api_key = _get_llm_params(provider, model, api_key)
 
     system = (
@@ -95,7 +112,6 @@ def call_llm_stream(
 
     if provider == "Groq":
         from groq import Groq
-
         client = Groq(api_key=api_key or GROQ_API_KEY)
         for chunk in client.chat.completions.create(  # type: ignore[call-overload]
             model=model or "",
@@ -106,30 +122,27 @@ def call_llm_stream(
             delta = chunk.choices[0].delta.content
             if delta:
                 yield delta
+        return
 
-    elif provider == "Ollama Cloud":
-        import requests as _req
-
-        resp = _req.post(
-            f"{OLLAMA_CLOUD_URL}/api/chat",
-            headers={"Authorization": f"Bearer {api_key or OLLAMA_CLOUD_API_KEY}"},
-            json={"model": model, "messages": messages, "stream": True},
-            stream=True,
-            timeout=120,
-        )
-        for line in resp.iter_lines():
-            if line:
-                try:
-                    data = _json.loads(line)
-                    token = data.get("message", {}).get("content", "")
-                    if token:
-                        yield token
-                    if data.get("done"):
-                        break
-                except Exception:
-                    pass
-    else:
-        yield "❌ Nieznany provider LLM."
+    # Ollama — standardowe wywołanie localhost z kluczem cloud w nagłówku
+    resp = _req.post(
+        f"{OLLAMA_URL}/api/chat",
+        headers=_ollama_headers(),
+        json={"model": model, "messages": messages, "stream": True},
+        stream=True,
+        timeout=120,
+    )
+    for line in resp.iter_lines():
+        if line:
+            try:
+                data = _json.loads(line)
+                token = data.get("message", {}).get("content", "")
+                if token:
+                    yield token
+                if data.get("done"):
+                    break
+            except Exception:
+                pass
 
 
 def call_llm_json(
@@ -141,16 +154,12 @@ def call_llm_json(
     """Wywołanie LLM z wymaganym wyjściem JSON (bez streamowania)."""
     provider, model, api_key = _get_llm_params(provider, model, api_key)
     messages = [
-        {
-            "role": "system",
-            "content": "Odpowiadaj WYŁĄCZNIE poprawnym JSON. Bez komentarzy.",
-        },
+        {"role": "system", "content": "Odpowiadaj WYŁĄCZNIE poprawnym JSON. Bez komentarzy."},
         {"role": "user", "content": prompt},
     ]
     try:
         if provider == "Groq":
             from groq import Groq
-
             client = Groq(api_key=api_key or GROQ_API_KEY)
             resp = client.chat.completions.create(  # type: ignore[call-overload]
                 model=model or "",
@@ -160,21 +169,15 @@ def call_llm_json(
                 response_format={"type": "json_object"},
             )
             return _json.loads(resp.choices[0].message.content or "{}")
-        elif provider == "Ollama Cloud":
-            import requests as _req
 
-            resp = _req.post(
-                f"{OLLAMA_CLOUD_URL}/api/chat",
-                headers={"Authorization": f"Bearer {api_key or OLLAMA_CLOUD_API_KEY}"},
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "stream": False,
-                    "format": "json",
-                },
-                timeout=30,
-            )
-            return _json.loads(resp.json().get("message", {}).get("content", "{}"))
+        # Ollama — parametr "format": "json" wymusza wyjście JSON
+        r = _req.post(
+            f"{OLLAMA_URL}/api/chat",
+            headers=_ollama_headers(),
+            json={"model": model, "messages": messages, "stream": False, "format": "json"},
+            timeout=30,
+        )
+        return _json.loads(r.json().get("message", {}).get("content", "{}"))
     except Exception:
         pass
     return {}

@@ -17,7 +17,6 @@ from models import (
     AgentMemory,
 )
 
-
 # ─────────────────────────── CSS PORTALU UODO ────────────────────
 
 UODO_CSS = """
@@ -50,12 +49,23 @@ UODO_CSS = """
         --uodo-border-radius: 2px;
     }
 
+    /* ── Jawne białe tło — nadpisuje dark mode Streamlit ── */
+    .stApp,
+    .stApp > div,
+    section[data-testid="stSidebar"] ~ div {
+        background-color: #ffffff !important;
+    }
+    html, body, [class*="css"] {
+        font-family: 'Red Hat Display', sans-serif !important;
+        color: var(--body-color);
+        background-color: #ffffff !important;
+    }
     html, body, [class*="css"] {
         font-family: 'Red Hat Display', sans-serif !important;
         color: var(--body-color);
     }
 
-    [data-testid="stHeader"]  { display: none; }
+    [data-testid="stHeader"]  { background: transparent !important; box-shadow: none !important; }
     footer                    { display: none; }
     .main .block-container    { padding-top: 0 !important; max-width: 1150px; }
 
@@ -218,8 +228,25 @@ PAGE_HEADER_HTML = """
 # ─────────────────────────── BUDOWANIE KONTEKSTU LLM ─────────────
 
 _FRAGMENT_STOPWORDS = {
-    "jakie", "są", "w", "o", "i", "z", "do", "na", "co", "ile",
-    "jak", "czy", "przez", "dla", "po", "przy", "od", "ze", "to",
+    "jakie",
+    "są",
+    "w",
+    "o",
+    "i",
+    "z",
+    "do",
+    "na",
+    "co",
+    "ile",
+    "jak",
+    "czy",
+    "przez",
+    "dla",
+    "po",
+    "przy",
+    "od",
+    "ze",
+    "to",
 }
 
 
@@ -228,7 +255,8 @@ def _extract_fragment(content: str, query: str, max_len: int = 2000) -> str:
     if not content or len(content) <= max_len:
         return content
     keywords = [
-        w.lower() for w in re.split(r"\W+", query)
+        w.lower()
+        for w in re.split(r"\W+", query)
         if w.lower() not in _FRAGMENT_STOPWORDS and len(w) > 2
     ]
     if not keywords:
@@ -237,10 +265,10 @@ def _extract_fragment(content: str, query: str, max_len: int = 2000) -> str:
     best_score, best_pos = -1, 0
     cl = content.lower()
     for pos in range(0, max(1, len(content) - max_len), step):
-        score = sum(cl[pos: pos + max_len].count(kw) for kw in keywords)
+        score = sum(cl[pos : pos + max_len].count(kw) for kw in keywords)
         if score > best_score:
             best_score, best_pos = score, pos
-    fragment = content[best_pos: best_pos + max_len]
+    fragment = content[best_pos : best_pos + max_len]
     if best_pos > 0:
         nl = fragment.find("\n")
         if 0 < nl < 150:
@@ -268,7 +296,9 @@ def build_context(
     if f.get("term_legal_basis"):
         filter_lines.append(f"Podstawa prawna: {', '.join(f['term_legal_basis'])}")
     if f.get("term_corrective_measure"):
-        filter_lines.append(f"Środek naprawczy: {', '.join(f['term_corrective_measure'])}")
+        filter_lines.append(
+            f"Środek naprawczy: {', '.join(f['term_corrective_measure'])}"
+        )
     if f.get("term_sector"):
         filter_lines.append(f"Sektor: {', '.join(f['term_sector'])}")
     if f.get("keyword"):
@@ -276,7 +306,8 @@ def build_context(
 
     filter_note = (
         "UWAGA: Wyniki zawężone filtrami: " + "; ".join(filter_lines) + ".\n"
-        if filter_lines else ""
+        if filter_lines
+        else ""
     )
 
     memory_note = ""
@@ -288,16 +319,25 @@ def build_context(
                 + (", ".join(e.top_signatures[:3]) if e.top_signatures else "brak")
                 for e in related[:2]
             ]
-            memory_note = "KONTEKST Z POPRZEDNICH ANALIZ (tej sesji):\n" + "\n".join(snippets) + "\n"
+            memory_note = (
+                "KONTEKST Z POPRZEDNICH ANALIZ (tej sesji):\n"
+                + "\n".join(snippets)
+                + "\n"
+            )
 
-    header = TPL_HEADER.render(query=query, filter_note=filter_note, memory_note=memory_note)
+    header = TPL_HEADER.render(
+        query=query, filter_note=filter_note, memory_note=memory_note
+    )
     parts = [header]
     chars = len(header)
 
     # Decyzje UODO pierwsze, RODO ostatnie
     docs_sorted = sorted(
         docs,
-        key=lambda d: (CONTEXT_TYPE_ORDER.get(d.get("doc_type", ""), 9), -d.get("_score", 0)),
+        key=lambda d: (
+            CONTEXT_TYPE_ORDER.get(d.get("doc_type", ""), 9),
+            -d.get("_score", 0),
+        ),
     )
 
     for i, doc in enumerate(docs_sorted, 1):
@@ -305,19 +345,25 @@ def build_context(
 
         if dtype == "legal_act_article":
             chunk_idx = doc.get("chunk_index", 0)
-            total     = doc.get("chunk_total", 1)
-            suffix    = f"(część {chunk_idx + 1}/{total})" if total > 1 else ""
+            total = doc.get("chunk_total", 1)
+            suffix = f"(część {chunk_idx + 1}/{total})" if total > 1 else ""
             block = TPL_ACT_ARTICLE.render(
-                rank=i, art_num=doc.get("article_num", "?"),
-                label_suffix=suffix, text=doc.get("content_text", ""),
+                rank=i,
+                art_num=doc.get("article_num", "?"),
+                label_suffix=suffix,
+                text=doc.get("content_text", ""),
             )
         elif dtype in ("gdpr_article", "gdpr_recital"):
             art_num = doc.get("article_num", "?")
-            prefix  = "Motyw" if dtype == "gdpr_recital" else f"Art. {art_num}"
-            block = TPL_GDPR.render(rank=i, prefix=prefix, text=doc.get("content_text", ""))
+            prefix = "Motyw" if dtype == "gdpr_recital" else f"Art. {art_num}"
+            block = TPL_GDPR.render(
+                rank=i, prefix=prefix, text=doc.get("content_text", "")
+            )
         else:
-            keywords = doc.get("keywords_text", "") or ", ".join(doc.get("keywords", []))
-            acts     = doc.get("related_acts", [])[:4] + doc.get("related_eu_acts", [])[:2]
+            keywords = doc.get("keywords_text", "") or ", ".join(
+                doc.get("keywords", [])
+            )
+            acts = doc.get("related_acts", [])[:4] + doc.get("related_eu_acts", [])[:2]
             block = TPL_DECISION.render(
                 rank=i,
                 sig=doc.get("signature", "?"),
@@ -340,54 +386,77 @@ def build_context(
 
 # ─────────────────────────── KARTY WYNIKÓW ───────────────────────
 
+
 def decision_url(doc: dict[str, Any]) -> str:
     sig = doc.get("signature", "")
     url = doc.get("source_url", "")
     if url:
         return url
     import re as _re
-    slug   = sig.lower().replace(".", "_")
+
+    slug = sig.lower().replace(".", "_")
     year_m = _re.search(r"\b(20\d{2})\b", sig)
-    year   = year_m.group(1) if year_m else "2024"
+    year = year_m.group(1) if year_m else "2024"
     return f"{UODO_PORTAL_BASE}/urn:ndoc:gov:pl:uodo:{year}:{slug}/content"
 
 
 def render_decision_card(doc: dict[str, Any], rank: int) -> None:
-    sig      = doc.get("signature", "?")
-    status   = doc.get("status", "")
-    date     = doc.get("date_published", "") or doc.get("date_issued", "")
-    source   = doc.get("_source", "")
+    sig = doc.get("signature", "?")
+    status = doc.get("status", "")
+    date = doc.get("date_published", "") or doc.get("date_issued", "")
+    source = doc.get("_source", "")
     graph_rel = doc.get("_graph_relation", "")
-    title    = doc.get("title_full", "") or doc.get("title", "")
-    name     = doc.get("title", sig)
-    url      = decision_url(doc)
+    title = doc.get("title_full", "") or doc.get("title", "")
+    name = doc.get("title", sig)
+    url = decision_url(doc)
 
     kw_list = doc.get("keywords", [])
     if isinstance(kw_list, str):
         kw_list = [k.strip() for k in kw_list.split(",") if k.strip()]
-    taxonomy_values = {v.lower() for v in doc.get("term_decision_type", []) + doc.get("term_sector", [])}
+    taxonomy_values = {
+        v.lower()
+        for v in doc.get("term_decision_type", []) + doc.get("term_sector", [])
+    }
     kw_list = [k for k in kw_list if k.lower() not in taxonomy_values]
 
-    status_cls = {"prawomocna": "status-final", "nieprawomocna": "status-nonfinal",
-                  "uchylona": "status-repealed"}.get(status, "status-unknown")
+    status_cls = {
+        "prawomocna": "status-final",
+        "nieprawomocna": "status-nonfinal",
+        "uchylona": "status-repealed",
+    }.get(status, "status-unknown")
 
     date_fmt = ""
     if date:
         try:
             from datetime import datetime
+
             d = datetime.strptime(date[:10], "%Y-%m-%d")
-            months = ["stycznia","lutego","marca","kwietnia","maja","czerwca",
-                      "lipca","sierpnia","września","października","listopada","grudnia"]
+            months = [
+                "stycznia",
+                "lutego",
+                "marca",
+                "kwietnia",
+                "maja",
+                "czerwca",
+                "lipca",
+                "sierpnia",
+                "września",
+                "października",
+                "listopada",
+                "grudnia",
+            ]
             date_fmt = f"{d.day} {months[d.month - 1]} {d.year}"
         except Exception:
             date_fmt = date[:10]
 
     graph_badge = (
         f' <span class="status-badge status-unknown">↗ {graph_rel or "graf"}</span>'
-        if source == "graph" else ""
+        if source == "graph"
+        else ""
     )
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <article class="doc-list-item">
       <header>
         <a href="{url}" target="_blank">{sig}</a>
@@ -400,13 +469,15 @@ def render_decision_card(doc: dict[str, Any], rank: int) -> None:
         </h2>
         <p class="text-muted">{title[:280] + "…" if len(title) > 280 else title}</p>
       </main>
-    </article>""", unsafe_allow_html=True)
+    </article>""",
+        unsafe_allow_html=True,
+    )
 
     with st.container():
         if kw_list:
-            shown  = kw_list[:8]
-            rest   = len(kw_list) - len(shown)
-            tags   = " · ".join(f"`{k}`" for k in shown)
+            shown = kw_list[:8]
+            rest = len(kw_list) - len(shown)
+            tags = " · ".join(f"`{k}`" for k in shown)
             suffix = f" *+{rest} więcej*" if rest > 0 else ""
             st.caption(f"🏷️ {tags}{suffix}")
         all_acts = doc.get("related_acts", [])[:4] + doc.get("related_eu_acts", [])[:2]
@@ -418,14 +489,17 @@ def render_decision_card(doc: dict[str, Any], rank: int) -> None:
 
 
 def render_act_article_card(doc: dict[str, Any], rank: int) -> None:
-    art_num   = doc.get("article_num", "?")
+    art_num = doc.get("article_num", "?")
     chunk_idx = doc.get("chunk_index", 0)
-    total     = doc.get("chunk_total", 1)
-    score     = doc.get("_score", 0)
-    text      = doc.get("content_text", "")[:600]
-    label     = f"Art. {art_num} u.o.d.o." + (f" (część {chunk_idx + 1}/{total})" if total > 1 else "")
+    total = doc.get("chunk_total", 1)
+    score = doc.get("_score", 0)
+    text = doc.get("content_text", "")[:600]
+    label = f"Art. {art_num} u.o.d.o." + (
+        f" (część {chunk_idx + 1}/{total})" if total > 1 else ""
+    )
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <article class="doc-list-item">
       <header>
         <a href="{ISAP_ACT_URL}" target="_blank">{label}</a>
@@ -438,29 +512,33 @@ def render_act_article_card(doc: dict[str, Any], rank: int) -> None:
         <p>{text}{"…" if len(doc.get("content_text", "")) > 600 else ""}</p>
       </main>
       <footer><small class="text-muted">score: {score:.3f}</small></footer>
-    </article>""", unsafe_allow_html=True)
+    </article>""",
+        unsafe_allow_html=True,
+    )
 
 
 def render_gdpr_card(doc: dict[str, Any], rank: int) -> None:
-    art_num      = doc.get("article_num", "?")
-    chunk_idx    = doc.get("chunk_index", 0)
-    total        = doc.get("chunk_total", 1)
-    score        = doc.get("_score", 0)
-    text         = doc.get("content_text", "")[:500]
-    dtype        = doc.get("doc_type", "")
-    chapter      = doc.get("chapter", "")
+    art_num = doc.get("article_num", "?")
+    chunk_idx = doc.get("chunk_index", 0)
+    total = doc.get("chunk_total", 1)
+    score = doc.get("_score", 0)
+    text = doc.get("content_text", "")[:500]
+    dtype = doc.get("doc_type", "")
+    chapter = doc.get("chapter", "")
     chapter_title = doc.get("chapter_title", "")
-    is_recital   = dtype == "gdpr_recital"
-    label        = art_num if is_recital else f"Art. {art_num} RODO"
-    badge_txt    = "motyw RODO" if is_recital else "RODO"
+    is_recital = dtype == "gdpr_recital"
+    label = art_num if is_recital else f"Art. {art_num} RODO"
+    badge_txt = "motyw RODO" if is_recital else "RODO"
     if not is_recital and total > 1:
         label += f" (część {chunk_idx + 1}/{total})"
     chapter_html = (
         f'<small class="text-muted">Rozdział {chapter} — {chapter_title}</small>'
-        if chapter and chapter_title else ""
+        if chapter and chapter_title
+        else ""
     )
 
-    st.markdown(f"""
+    st.markdown(
+        f"""
     <article class="doc-list-item">
       <header>
         <a href="{GDPR_URL}" target="_blank">{label}</a>
@@ -471,7 +549,9 @@ def render_gdpr_card(doc: dict[str, Any], rank: int) -> None:
         <p>{text}{"…" if len(doc.get("content_text", "")) > 500 else ""}</p>
       </main>
       <footer><small class="text-muted">score: {score:.3f}</small></footer>
-    </article>""", unsafe_allow_html=True)
+    </article>""",
+        unsafe_allow_html=True,
+    )
 
 
 def render_card(doc: dict[str, Any], rank: int) -> None:
