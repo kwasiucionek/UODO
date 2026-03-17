@@ -151,9 +151,7 @@ def call_llm_stream(
                 pass
 
 
-def call_llm_json(prompt, provider=None, model=None, api_key=None):
-    import sys
-    print(f"[call_llm_json] called, provider={provider}, model={model}", file=sys.stderr, flush=True)
+def call_llm_json(
     prompt: str,
     provider: str | None = None,
     model: str | None = None,
