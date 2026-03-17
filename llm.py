@@ -14,6 +14,7 @@ LLM analizuje pytanie PRZED wyszukiwaniem zamiast szukać surowej frazy.
 """
 
 import json as _json
+import logging
 from collections.abc import Generator
 from typing import Any
 
@@ -29,7 +30,6 @@ from config import (
 )
 from models import QueryDecomposition, QueryType
 
-
 # ─────────────────────────── LISTA MODELI ────────────────────────
 
 
@@ -39,6 +39,7 @@ def get_available_models(provider: str, api_key: str | None = None) -> list[str]
     if provider == "Groq":
         try:
             from groq import Groq
+
             client = Groq(api_key=api_key or GROQ_API_KEY)
             ids = sorted(
                 m.id
@@ -70,7 +71,11 @@ def _ollama_headers() -> dict[str, str]:
     """Nagłówki dla każdego wywołania Ollama — klucz cloud jest zawsze wysyłany.
     Dla modeli czysto lokalnych Ollama ignoruje nagłówek Authorization.
     """
-    return {"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}"} if OLLAMA_CLOUD_API_KEY else {}
+    return (
+        {"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}"}
+        if OLLAMA_CLOUD_API_KEY
+        else {}
+    )
 
 
 def _get_llm_params(
@@ -79,8 +84,8 @@ def _get_llm_params(
     """Zwraca (provider, model, api_key) — z session_state jeśli nie podano."""
     return (
         provider or st.session_state.get("llm_provider", DEFAULT_PROVIDER),
-        model    or st.session_state.get("llm_model", ""),
-        api_key  or st.session_state.get("llm_api_key", ""),
+        model or st.session_state.get("llm_model", ""),
+        api_key or st.session_state.get("llm_api_key", ""),
     )
 
 
@@ -112,6 +117,7 @@ def call_llm_stream(
 
     if provider == "Groq":
         from groq import Groq
+
         client = Groq(api_key=api_key or GROQ_API_KEY)
         for chunk in client.chat.completions.create(  # type: ignore[call-overload]
             model=model or "",
@@ -145,21 +151,30 @@ def call_llm_stream(
                 pass
 
 
-def call_llm_json(
+def call_llm_json(prompt, provider=None, model=None, api_key=None):
+    import sys
+    print(f"[call_llm_json] called, provider={provider}, model={model}", file=sys.stderr, flush=True)
     prompt: str,
     provider: str | None = None,
     model: str | None = None,
     api_key: str | None = None,
 ) -> dict[str, Any]:
     """Wywołanie LLM z wymaganym wyjściem JSON (bez streamowania)."""
+    import logging
+    import re as _re
+
     provider, model, api_key = _get_llm_params(provider, model, api_key)
     messages = [
-        {"role": "system", "content": "Odpowiadaj WYŁĄCZNIE poprawnym JSON. Bez komentarzy."},
+        {
+            "role": "system",
+            "content": "Odpowiadaj WYŁĄCZNIE poprawnym JSON. Bez komentarzy. Bez markdown. Bez bloków ```json```.",
+        },
         {"role": "user", "content": prompt},
     ]
     try:
         if provider == "Groq":
             from groq import Groq
+
             client = Groq(api_key=api_key or GROQ_API_KEY)
             resp = client.chat.completions.create(  # type: ignore[call-overload]
                 model=model or "",
@@ -168,18 +183,34 @@ def call_llm_json(
                 temperature=0.0,
                 response_format={"type": "json_object"},
             )
-            return _json.loads(resp.choices[0].message.content or "{}")
+            raw = resp.choices[0].message.content or "{}"
+        else:
+            r = _req.post(
+                f"{OLLAMA_URL}/api/chat",
+                headers=_ollama_headers(),
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                    "format": "json",
+                },
+                timeout=30,
+            )
+            raw = r.json().get("message", {}).get("content", "{}") or "{}"
 
-        # Ollama — parametr "format": "json" wymusza wyjście JSON
-        r = _req.post(
-            f"{OLLAMA_URL}/api/chat",
-            headers=_ollama_headers(),
-            json={"model": model, "messages": messages, "stream": False, "format": "json"},
-            timeout=30,
-        )
-        return _json.loads(r.json().get("message", {}).get("content", "{}"))
-    except Exception:
-        pass
+        logging.warning(f"LLM JSON raw: {raw[:300]}")
+
+        # Wyczyść markdown jeśli model go dodał
+        raw = raw.strip()
+        # Wyciągnij pierwszy blok JSON przez regex — najbardziej niezawodna metoda
+        match = _re.search(r"\{.*\}", raw, _re.DOTALL)
+        if match:
+            raw = match.group(0)
+
+        return _json.loads(raw)
+
+    except Exception as e:
+        logging.warning(f"call_llm_json failed: {e}")
     return {}
 
 
