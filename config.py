@@ -32,7 +32,7 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 PROVIDERS = ["Ollama", "Groq"]
 DEFAULT_PROVIDER = "Ollama"
-DEFAULT_OLLAMA_MODEL = "gpt-oss:120b-cloud"
+DEFAULT_OLLAMA_MODEL = "mistral-large-3:675b-cloud"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 
 # ── Wyszukiwanie ─────────────────────────────────────────────────
