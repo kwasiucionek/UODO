@@ -55,7 +55,7 @@ def main() -> None:
 
         provider = st.selectbox("Provider LLM", ["Ollama", "Groq"], key="provider_select")
 
-        # Klucz API tylko dla Groq — Ollama używa OLLAMA_CLOUD_API_KEY z .env
+        # Klucz API tylko dla Groq — Ollama używa OLLAMA_API_KEY z .env
         if provider == "Groq":
             api_key = st.text_input(
                 "Klucz API Groq", type="password",
@@ -288,6 +288,8 @@ def main() -> None:
                     if decomp.enriched_query != effective_query:
                         st.caption(f"**Wzbogacone zapytanie:** _{decomp.enriched_query}_")
 
+        # search_query (enriched) → semantic search
+        # effective_query (oryginalne) → ekstrakcja tagów w hybrid_search
         search_query = decomp.enriched_query if decomp else effective_query
         if decomp and decomp.year_from_hint and "year_from" not in filters:
             filters["year_from"] = decomp.year_from_hint
@@ -314,9 +316,19 @@ def main() -> None:
                                 docs.append(rdoc)
                 else:
                     st.warning(f"Nie znaleziono decyzji o sygnaturze **{sig_norm}** w bazie.")
-                    docs, _tags = hybrid_search(search_query, filters=filters, use_graph=use_graph)
+                    docs, _tags = hybrid_search(
+                        effective_query,
+                        search_query=search_query,
+                        filters=filters,
+                        use_graph=use_graph,
+                    )
             else:
-                docs, _tags = hybrid_search(search_query, filters=filters, use_graph=use_graph)
+                docs, _tags = hybrid_search(
+                    effective_query,
+                    search_query=search_query,
+                    filters=filters,
+                    use_graph=use_graph,
+                )
             search_time = time.time() - t0
 
         if not docs:
