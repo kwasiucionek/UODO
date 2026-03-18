@@ -361,13 +361,13 @@ def main() -> None:
                             f"**Wzbogacone zapytanie:** _{decomp.enriched_query}_"
                         )
 
-                # Do semantic search używamy tylko kluczowych słów z dekompozycji —
-                # enriched_query jest zbyt opisowe i rozmywa wyniki semantyczne.
-                # search_keywords to wyselekcjonowane frazy, np. ["kampania wyborcza", "prawo wyborcze"]
-                if decomp and decomp.search_keywords:
-                    search_query = " ".join(decomp.search_keywords[:3])
-                else:
-                    search_query = effective_query
+        # Do semantic search używamy tylko kluczowych słów z dekompozycji —
+        # enriched_query jest zbyt opisowe i rozmywa wyniki semantyczne.
+        # search_keywords to wyselekcjonowane frazy, np. ["kampania wyborcza", "prawo wyborcze"]
+        if decomp and decomp.search_keywords:
+            search_query = " ".join(decomp.search_keywords[:3])
+        else:
+            search_query = effective_query
         if decomp and decomp.year_from_hint and "year_from" not in filters:
             filters["year_from"] = decomp.year_from_hint
         if decomp and decomp.year_to_hint and "year_to" not in filters:
