@@ -9,9 +9,6 @@ from typing import Any
 
 import networkx as nx
 import streamlit as st
-from qdrant_client import QdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue, Range
-
 from config import (
     COLLECTION_NAME,
     DEFAULT_PROVIDER,
@@ -26,6 +23,8 @@ from config import (
     TAXONOMY_STATIC,
     TOP_K,
 )
+from qdrant_client import QdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue, Range
 
 # ─────────────────────────── CACHE / ZASOBY ──────────────────────
 
@@ -395,6 +394,7 @@ def doc_key(d: dict[str, Any]) -> str:
 
 def hybrid_search(
     query: str,
+    search_query: str | None = None,
     top_k: int = TOP_K,
     filters: dict[str, Any] | None = None,
     use_graph: bool = True,
@@ -406,8 +406,9 @@ def hybrid_search(
       2. Artykuły u.o.d.o. — max MAX_ACT_DOCS
       3. Artykuły RODO — max MAX_GDPR_DOCS
     """
-    # Tagi LLM — wywołujemy raz, używamy tylko jako fallback
-    matched_tags = get_matched_tags(query)
+
+    sem_query = search_query or query  # semantic search używa enriched
+    matched_tags = get_matched_tags(query)  # tagi z oryginalnego zapytania
 
     seen_keys: set[str] = set()
     decisions: list[dict[str, Any]] = []
