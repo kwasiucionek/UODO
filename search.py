@@ -27,8 +27,8 @@ from config import (
     TOP_K,
 )
 
-
 # ─────────────────────────── CACHE / ZASOBY ──────────────────────
+
 
 @st.cache_resource
 def get_qdrant() -> QdrantClient:
@@ -38,6 +38,7 @@ def get_qdrant() -> QdrantClient:
 @st.cache_resource
 def get_embedder():
     from sentence_transformers import SentenceTransformer
+
     return SentenceTransformer(EMBED_MODEL, trust_remote_code=True)
 
 
@@ -56,14 +57,18 @@ def get_graph() -> nx.DiGraph | None:  # type: ignore[type-arg]
             limit=500,
             offset=offset,
             with_payload=[
-                "signature", "doc_type", "related_uodo_rulings",
-                "related_acts", "related_eu_acts", "related_court_rulings",
+                "signature",
+                "doc_type",
+                "related_uodo_rulings",
+                "related_acts",
+                "related_eu_acts",
+                "related_court_rulings",
             ],
             with_vectors=False,
         )
         for p in pts:
             pay = p.payload or {}
-            sig   = pay.get("signature", "")
+            sig = pay.get("signature", "")
             dtype = pay.get("doc_type", "")
             if not sig or dtype != "uodo_decision":
                 continue
@@ -91,6 +96,7 @@ def get_graph() -> nx.DiGraph | None:  # type: ignore[type-arg]
 
 # ─────────────────────────── WYSZUKIWANIE QDRANT ─────────────────
 
+
 def embed(text: str) -> list[float]:
     return get_embedder().encode(text, normalize_embeddings=True).tolist()
 
@@ -101,19 +107,32 @@ def _build_qdrant_filter(filters: dict[str, Any] | None) -> Filter | None:
     if not filters:
         return None
     if filters.get("status"):
-        must.append(FieldCondition(key="status", match=MatchValue(value=filters["status"])))
+        must.append(
+            FieldCondition(key="status", match=MatchValue(value=filters["status"]))
+        )
     if filters.get("keyword"):
-        must.append(FieldCondition(key="keywords", match=MatchValue(value=filters["keyword"])))
+        must.append(
+            FieldCondition(key="keywords", match=MatchValue(value=filters["keyword"]))
+        )
     if filters.get("doc_types"):
-        must.append(FieldCondition(key="doc_type", match=MatchAny(any=filters["doc_types"])))
+        must.append(
+            FieldCondition(key="doc_type", match=MatchAny(any=filters["doc_types"]))
+        )
     if filters.get("year_from") or filters.get("year_to"):
-        must.append(FieldCondition(
-            key="year",
-            range=Range(gte=filters.get("year_from", 2000), lte=filters.get("year_to", 2030)),
-        ))
+        must.append(
+            FieldCondition(
+                key="year",
+                range=Range(
+                    gte=filters.get("year_from", 2000), lte=filters.get("year_to", 2030)
+                ),
+            )
+        )
     for term_field in (
-        "term_decision_type", "term_violation_type",
-        "term_legal_basis", "term_corrective_measure", "term_sector",
+        "term_decision_type",
+        "term_violation_type",
+        "term_legal_basis",
+        "term_corrective_measure",
+        "term_sector",
     ):
         vals = filters.get(term_field, [])
         if vals:
@@ -139,7 +158,7 @@ def semantic_search(
     docs = []
     for hit in res.points or []:
         d = (hit.payload or {}).copy()
-        d["_score"]  = hit.score
+        d["_score"] = hit.score
         d["_source"] = "semantic"
         docs.append(d)
     return docs
@@ -150,9 +169,9 @@ def keyword_exact_search(
 ) -> list[dict[str, Any]]:
     """Pobiera WSZYSTKIE dokumenty z danym tagiem (scroll z paginacją, bez limitu)."""
     client = get_qdrant()
-    kw_filters    = {**(filters or {}), "keyword": keyword}
+    kw_filters = {**(filters or {}), "keyword": keyword}
     qdrant_filter = _build_qdrant_filter(kw_filters)
-    docs   = []
+    docs = []
     offset = None
     while True:
         pts, next_offset = client.scroll(
@@ -164,7 +183,7 @@ def keyword_exact_search(
         )
         for pt in pts or []:
             d = (pt.payload or {}).copy()
-            d["_score"]  = 1.0
+            d["_score"] = 1.0
             d["_source"] = "keyword"
             docs.append(d)
         if next_offset is None or not pts:
@@ -177,22 +196,25 @@ def fetch_by_signature(sig: str) -> dict[str, Any] | None:
     client = get_qdrant()
     pts, _ = client.scroll(
         collection_name=COLLECTION_NAME,
-        scroll_filter=Filter(must=[
-            FieldCondition(key="signature", match=MatchValue(value=sig)),
-            FieldCondition(key="doc_type",  match=MatchValue(value="uodo_decision")),
-        ]),
+        scroll_filter=Filter(
+            must=[
+                FieldCondition(key="signature", match=MatchValue(value=sig)),
+                FieldCondition(key="doc_type", match=MatchValue(value="uodo_decision")),
+            ]
+        ),
         limit=1,
         with_payload=True,
     )
     if pts:
         d = (pts[0].payload or {}).copy()
         d["_source"] = "graph"
-        d["_score"]  = 0.0
+        d["_score"] = 0.0
         return d
     return None
 
 
 # ─────────────────────────── GRAF POWIĄZAŃ ───────────────────────
+
 
 def graph_expand(
     seed_sigs: list[str], depth: int = GRAPH_DEPTH
@@ -201,12 +223,12 @@ def graph_expand(
     if G is None:
         return []
 
-    visited  = set(seed_sigs)
-    result   = []
+    visited = set(seed_sigs)
+    result = []
     frontier = set(seed_sigs)
 
     for d in range(depth):
-        decay        = 0.65 ** d
+        decay = 0.65**d
         new_frontier: set[str] = set()
         for node in frontier:
             if node not in G:
@@ -234,10 +256,11 @@ def graph_expand(
 
 # ─────────────────────────── TAGI I TAKSONOMIA ───────────────────
 
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_taxonomy_options() -> dict[str, list[str]]:
     """Opcje filtrów taksonomii. Statyczne wartości + dynamiczne z Qdrant."""
-    result         = {k: list(v) for k, v in TAXONOMY_STATIC.items()}
+    result = {k: list(v) for k, v in TAXONOMY_STATIC.items()}
     dynamic_fields = [f for f, v in TAXONOMY_STATIC.items() if not v]
     if not dynamic_fields:
         return result
@@ -249,9 +272,13 @@ def get_taxonomy_options() -> dict[str, list[str]]:
                 collection_name=COLLECTION_NAME,
                 limit=500,
                 offset=offset,
-                scroll_filter=Filter(must=[
-                    FieldCondition(key="doc_type", match=MatchValue(value="uodo_decision"))
-                ]),
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="doc_type", match=MatchValue(value="uodo_decision")
+                        )
+                    ]
+                ),
                 with_payload=dynamic_fields,
                 with_vectors=False,
             )
@@ -274,9 +301,9 @@ def get_taxonomy_options() -> dict[str, list[str]]:
 @st.cache_data(ttl=300, show_spinner=False)
 def get_all_tags() -> list[str]:
     """Wszystkie unikalne tagi z kolekcji (cache 5 min)."""
-    client   = get_qdrant()
+    client = get_qdrant()
     all_tags: set[str] = set()
-    offset   = None
+    offset = None
     while True:
         pts, next_offset = client.scroll(
             collection_name=COLLECTION_NAME,
@@ -324,7 +351,7 @@ def extract_tags_with_llm(query: str, available_tags: list[str]) -> list[str]:
         if not lines and isinstance(raw, dict):
             lines = list(raw.values())[0] if raw else []
 
-        tags_lower        = {t.lower(): t for t in available_tags}
+        tags_lower = {t.lower(): t for t in available_tags}
         existing_found, new_found = [], []
         for item in lines:
             line = str(item).strip().lstrip("- ").strip()
@@ -348,14 +375,15 @@ def get_matched_tags(query: str) -> list[str]:
 
 # ─────────────────────────── DEDUPLIKACJA ────────────────────────
 
+
 def doc_key(d: dict[str, Any]) -> str:
     """Unikalny klucz dokumentu do deduplikacji."""
     doc_id = d.get("doc_id", "")
     if doc_id:
         return doc_id
-    sig   = d.get("signature", "")
+    sig = d.get("signature", "")
     dtype = d.get("doc_type", "")
-    art   = d.get("article_num", "")
+    art = d.get("article_num", "")
     chunk = d.get("chunk_index", 0)
     if dtype in ("legal_act_article", "gdpr_article", "gdpr_recital"):
         return f"{dtype}:{sig}:{art}:{chunk}"
@@ -363,6 +391,7 @@ def doc_key(d: dict[str, Any]) -> str:
 
 
 # ─────────────────────────── HYBRID SEARCH ───────────────────────
+
 
 def hybrid_search(
     query: str,
@@ -380,9 +409,9 @@ def hybrid_search(
     # Tagi LLM — wywołujemy raz, używamy tylko jako fallback
     matched_tags = get_matched_tags(query)
 
-    seen_keys: set[str]          = set()
+    seen_keys: set[str] = set()
     decisions: list[dict[str, Any]] = []
-    act_docs:  list[dict[str, Any]] = []
+    act_docs: list[dict[str, Any]] = []
     gdpr_docs: list[dict[str, Any]] = []
 
     def _add(bucket: list, doc: dict) -> bool:
@@ -403,36 +432,46 @@ def hybrid_search(
     # 1a. Explicit keyword z UI (filtr ręczny użytkownika)
     explicit_keyword = (filters or {}).get("keyword", "")
     if explicit_keyword:
-        for d in keyword_exact_search(explicit_keyword, {**filters_base, "doc_types": ["uodo_decision"]}):
+        for d in keyword_exact_search(
+            explicit_keyword, {**filters_base, "doc_types": ["uodo_decision"]}
+        ):
             _add(decisions, d)
 
     # 1b. Frazy bezpośrednio z zapytania → scroll po tagu BEZ LLM
     # Szukamy 1- i 2-wyrazowych fraz z query w liście tagów bazy.
     # Unikamy przez to "dane biometryczne" gdy user pyta o "dane genetyczne".
     words = [
-        w.lower() for w in re.split(r"\W+", query)
+        w.lower()
+        for w in re.split(r"\W+", query)
         if w.lower() not in QUERY_STOPWORDS and len(w) > 2
     ]
-    direct_phrases: list[str] = list(dict.fromkeys(
-        words + [f"{words[i]} {words[i + 1]}" for i in range(len(words) - 1)]
-    ))
+    direct_phrases: list[str] = list(
+        dict.fromkeys(
+            words + [f"{words[i]} {words[i + 1]}" for i in range(len(words) - 1)]
+        )
+    )
     all_tags_lower = {t.lower(): t for t in get_all_tags()}
-    direct_hits    = [all_tags_lower[p] for p in direct_phrases if p in all_tags_lower]
+    direct_hits = [all_tags_lower[p] for p in direct_phrases if p in all_tags_lower]
 
     for tag in direct_hits:
-        for d in keyword_exact_search(tag, {**filters_base, "doc_types": ["uodo_decision"]}):
+        for d in keyword_exact_search(
+            tag, {**filters_base, "doc_types": ["uodo_decision"]}
+        ):
             _add(decisions, d)
 
     # 1c. Tagi LLM — tylko gdy 1b nic nie znalazło (fraza nie jest tagiem)
     if not decisions and matched_tags:
         for tag in matched_tags:
-            for d in keyword_exact_search(tag, {**filters_base, "doc_types": ["uodo_decision"]}):
+            for d in keyword_exact_search(
+                tag, {**filters_base, "doc_types": ["uodo_decision"]}
+            ):
                 _add(decisions, d)
 
     # 1d. Semantic — ostatni fallback gdy tagi nic nie dały
     if len(decisions) < 5:
         for d in semantic_search(
-            query, top_k=20,
+            query,
+            top_k=20,
             filters={**filters_base, "doc_types": ["uodo_decision"]},
             score_threshold=0.45,
         ):
@@ -445,7 +484,9 @@ def hybrid_search(
     # ═══════════════════════════════════════════════════════════════
 
     if explicit_keyword:
-        for d in keyword_exact_search(explicit_keyword, {**filters_base, "doc_types": ["legal_act_article"]}):
+        for d in keyword_exact_search(
+            explicit_keyword, {**filters_base, "doc_types": ["legal_act_article"]}
+        ):
             if len(act_docs) >= MAX_ACT_DOCS:
                 break
             _add(act_docs, d)
@@ -468,7 +509,9 @@ def hybrid_search(
     gdpr_types = ["gdpr_article", "gdpr_recital"]
 
     if explicit_keyword:
-        for d in keyword_exact_search(explicit_keyword, {**filters_base, "doc_types": gdpr_types}):
+        for d in keyword_exact_search(
+            explicit_keyword, {**filters_base, "doc_types": gdpr_types}
+        ):
             if len(gdpr_docs) >= MAX_GDPR_DOCS:
                 break
             _add(gdpr_docs, d)
@@ -501,7 +544,7 @@ def hybrid_search(
                 continue
             doc = fetch_by_signature(sig)
             if doc:
-                doc["_score"]          = score
+                doc["_score"] = score
                 doc["_graph_relation"] = rel_type
                 decisions.append(doc)
                 seen_graph.add(sig)
@@ -512,19 +555,23 @@ def hybrid_search(
 
 # ─────────────────────────── STATYSTYKI ──────────────────────────
 
+
 @st.cache_data(ttl=3600)
 def get_collection_stats() -> dict[str, Any]:
     client = get_qdrant()
-    info   = client.get_collection(COLLECTION_NAME)
-    total  = info.points_count
+    info = client.get_collection(COLLECTION_NAME)
+    total = info.points_count
 
-    decision_count  = 0
+    decision_count = 0
     act_chunk_count = 0
-    offset          = None
+    offset = None
     while True:
         pts, next_off = client.scroll(
-            collection_name=COLLECTION_NAME, limit=500, offset=offset,
-            with_payload=["doc_type"], with_vectors=False,
+            collection_name=COLLECTION_NAME,
+            limit=500,
+            offset=offset,
+            with_payload=["doc_type"],
+            with_vectors=False,
         )
         for p in pts:
             dtype = (p.payload or {}).get("doc_type", "")
@@ -539,11 +586,18 @@ def get_collection_stats() -> dict[str, Any]:
     G = get_graph()
     graph_stats: dict[str, Any] = {}
     if G:
-        uodo       = [n for n, d in G.nodes(data=True) if d.get("doc_type") == "uodo_decision"]
+        uodo = [
+            n for n, d in G.nodes(data=True) if d.get("doc_type") == "uodo_decision"
+        ]
         most_cited = sorted(
             [(n, G.in_degree(n)) for n in uodo if G.in_degree(n) > 0],
             key=lambda x: -x[1],
         )[:5]
         graph_stats = {"edges": G.number_of_edges(), "most_cited": most_cited}
 
-    return {"total": total, "decisions": decision_count, "act_chunks": act_chunk_count, **graph_stats}
+    return {
+        "total": total,
+        "decisions": decision_count,
+        "act_chunks": act_chunk_count,
+        **graph_stats,
+    }
