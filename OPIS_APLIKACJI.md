@@ -20,12 +20,27 @@
 
 ## 1. Cel i kontekst
 
-Aplikacja jest systemem **RAG (Retrieval-Augmented Generation)** — to podejście do budowania asystentów AI, w którym model językowy (LLM) odpowiada na pytania **wyłącznie na podstawie dostarczonych mu dokumentów**, a nie na podstawie własnej ogólnej wiedzy. Dzięki temu odpowiedzi są ugruntowane w konkretnych aktach prawnych i orzeczeniach, a nie w tym, czego model nauczył się podczas treningu.
+### Co to jest RAG?
 
-**Problem, który rozwiązuje:** Baza decyzji Prezesa UODO liczy ponad 560 orzeczeń. Tradycyjne wyszukiwanie pełnotekstowe jest niedokładne (nie rozumie sensu pytania), a przeglądanie ręczne jest bardzo czasochłonne. Aplikacja łączy wyszukiwanie semantyczne, filtrowanie po tagach i syntezę odpowiedzi przez LLM.
+Aplikacja jest systemem **RAG (Retrieval-Augmented Generation)** — dosłownie "Generowanie wspomagane wyszukiwaniem". Żeby zrozumieć po co to istnieje, warto najpierw zrozumieć problem z samymi modelami językowymi.
 
-**Trzy źródła wiedzy:**
-- **Decyzje UODO** — orzeczenia administracyjne Prezesa Urzędu Ochrony Danych Osobowych (~560 dokumentów)
+Modele AI jak GPT czy Claude są trenowane na ogromnych zbiorach tekstu z internetu. Wiedzą dużo o świecie, ale ich wiedza ma dwie fundamentalne wady:
+1. **Jest zamrożona w czasie** — model nie wie co wydarzyło się po dacie zakończenia treningu
+2. **Może być nieprecyzyjna lub zmyślona** — modele potrafią generować przekonująco brzmiące, ale fałszywe informacje (tzw. halucynacje)
+
+RAG rozwiązuje oba problemy: zamiast polegać na wiedzy modelu, **najpierw wyszukujemy odpowiednie dokumenty** z naszej własnej bazy, a potem podajemy je modelowi jako materiał źródłowy. Model odpowiada wyłącznie na podstawie tego co dostał — jak prawnik który cytuje konkretne przepisy, a nie swoją ogólną wiedzę o prawie.
+
+### Problem który rozwiązuje
+
+Baza decyzji Prezesa UODO liczy ponad 560 orzeczeń administracyjnych. Każde orzeczenie to kilka do kilkudziesięciu stron tekstu prawniczego. Analityk szukający precedensów dla konkretnego problemu (np. przetwarzania danych biometrycznych przez pracodawcę) musiałby ręcznie przejrzeć setki dokumentów.
+
+Tradycyjne wyszukiwanie pełnotekstowe (jak w Google) szuka dokładnych słów — nie rozumie sensu pytania. Zapytanie "jak firma powinna postąpić gdy pracownik odmawia zgody na monitoring" nie znajdzie decyzji opisującej "brak podstawy prawnej przetwarzania w stosunku pracy", choć semantycznie mówią o tym samym.
+
+Aplikacja łączy trzy techniki: wyszukiwanie po tagach (precyzyjne), wyszukiwanie semantyczne (rozumie sens) i syntezę odpowiedzi przez LLM (formułuje czytelną odpowiedź z odniesieniami do źródeł).
+
+### Trzy źródła wiedzy
+
+- **Decyzje UODO** — ~560 orzeczeń administracyjnych Prezesa Urzędu Ochrony Danych Osobowych, pobieranych z portalu orzeczenia.uodo.gov.pl
 - **Ustawa o ochronie danych osobowych (u.o.d.o.)** — artykuły 1–108, Dz.U. 2019 poz. 1781
 - **RODO** — 99 artykułów i 173 motywy preambuły rozporządzenia (UE) 2016/679
 
@@ -33,7 +48,7 @@ Aplikacja jest systemem **RAG (Retrieval-Augmented Generation)** — to podejśc
 
 ## 2. Architektura ogólna
 
-Aplikacja składa się z sześciu modułów Python oraz zestawu narzędzi:
+Aplikacja składa się z sześciu modułów Python oraz zestawu narzędzi w katalogu `tools/`:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -52,11 +67,13 @@ Aplikacja składa się z sześciu modułów Python oraz zestawu narzędzi:
 ```
 
 **Zewnętrzne zależności:**
-- **Qdrant** — wektorowa baza danych przechowująca embeddingi dokumentów i ich metadane (payloady)
-- **SentenceTransformers** — lokalny model embeddingowy `sdadas/mmlw-retrieval-roberta-large` (polski)
-- **NetworkX** — biblioteka do grafu powiązań między decyzjami
-- **Ollama Cloud / Groq** — zewnętrzne API LLM do generowania odpowiedzi i dekompozycji zapytań
-- **Streamlit** — framework webowy dla interfejsu użytkownika
+
+- **Qdrant** — wektorowa baza danych. Przechowuje dwa rodzaje danych dla każdego dokumentu: matematyczną reprezentację jego treści (embedding/wektor) oraz metadane (tagi, sygnatura, data, status). Działa jako osobny serwis Docker.
+- **SentenceTransformers** — biblioteka do generowania embeddingów. Używa polskiego modelu `sdadas/mmlw-retrieval-roberta-large` uruchamianego lokalnie na CPU.
+- **NetworkX** — biblioteka do grafu powiązań między decyzjami. Graf cytowań pozwala znaleźć decyzje powiązane tematycznie nawet jeśli nie zawierają szukanej frazy.
+- **Ollama** — lokalna instalacja daemona LLM. Modele cloud (np. `gpt-oss:120b-cloud`) pobierają tokeny z serwerów Ollama.com ale przez lokalny punkt dostępowy na porcie 11434.
+- **Groq** — alternatywne zewnętrzne API dla modeli LLM, z bezpłatnym limitem.
+- **Streamlit** — framework webowy dla interfejsu użytkownika. Zamienia skrypt Python w interaktywną aplikację webową bez konieczności pisania HTML/JavaScript.
 
 ---
 
@@ -64,65 +81,76 @@ Aplikacja składa się z sześciu modułów Python oraz zestawu narzędzi:
 
 Zanim aplikacja zacznie działać, dokumenty muszą zostać przetworzone i zaindeksowane w Qdrant. To jednorazowy (lub rzadki) proces wykonywany przez narzędzia z katalogu `tools/`.
 
-### 3.1 Struktura kolekcji Qdrant
+### 3.1 Co to jest embedding i dlaczego jest potrzebny?
+
+Komputery nie rozumieją tekstu — operują na liczbach. **Embedding** to sposób zamiany tekstu na listę liczb (wektor) w taki sposób, że teksty o podobnym znaczeniu mają podobne wektory, a teksty o różnym znaczeniu — różne.
+
+Przykład: zdania "przetwarzanie danych osobowych bez zgody" i "brak podstawy prawnej przetwarzania" są napisane różnymi słowami, ale opisują to samo zjawisko prawne. Model embeddingowy umieszcza je blisko siebie w przestrzeni matematycznej. Zdanie "przepis na bigos" trafia daleko od obu.
+
+Wektory mają wymiar ~1024 liczb — każda liczba reprezentuje pewien abstrakcyjny wymiar semantyczny. Nie da się tego intuicyjnie zinterpretować, ale matematyczna odległość między wektorami jest precyzyjną miarą podobieństwa semantycznego.
+
+### 3.2 Struktura kolekcji Qdrant
 
 Wszystkie dokumenty trafiają do **jednej kolekcji** o nazwie `uodo_decisions`. Każdy punkt (dokument) w Qdrant ma:
 
-- **Wektor** — embedding o wymiarze ~1024 (zależnie od modelu), reprezentujący semantyczne znaczenie treści
+- **Wektor** — 1024 liczb reprezentujących semantyczne znaczenie treści
 - **Payload** — słownik metadanych dostępny do filtrowania i wyświetlania
 
 Kluczowe pola payloadu:
 
-| Pole | Typ | Opis |
-|------|-----|------|
-| `doc_type` | keyword | `uodo_decision` / `legal_act_article` / `gdpr_article` / `gdpr_recital` |
-| `signature` | keyword | Sygnatura decyzji, np. `DKN.5110.16.2022` |
-| `keywords` | keyword[] | Lista tagów, np. `["dane genetyczne", "dane szczególnych kategorii"]` |
-| `status` | keyword | `prawomocna` / `nieprawomocna` / `uchylona` |
-| `year` | integer | Rok decyzji |
-| `content_text` | text | Pełna treść dokumentu (do 50 000 znaków) |
-| `term_decision_type` | keyword[] | Taksonomia: rodzaj decyzji |
-| `term_violation_type` | keyword[] | Taksonomia: rodzaj naruszenia |
-| `term_legal_basis` | keyword[] | Taksonomia: podstawa prawna |
-| `term_corrective_measure` | keyword[] | Taksonomia: środek naprawczy |
-| `term_sector` | keyword[] | Taksonomia: sektor |
-| `related_uodo_rulings` | text[] | Sygnatury cytowanych decyzji UODO |
-| `related_acts` | text[] | Cytowane polskie akty prawne |
-| `related_eu_acts` | text[] | Cytowane akty UE |
+| Pole | Typ | Przykład |
+|------|-----|---------|
+| `doc_type` | keyword | `uodo_decision` |
+| `signature` | keyword | `DKN.5110.16.2022` |
+| `keywords` | keyword[] | `["dane genetyczne", "dane szczególnych kategorii", "zdrowie"]` |
+| `status` | keyword | `prawomocna` |
+| `year` | integer | `2022` |
+| `content_text` | text | Pełna treść decyzji (do 50 000 znaków) |
+| `term_decision_type` | keyword[] | `["nakaz"]` |
+| `term_violation_type` | keyword[] | `["brak podstawy prawnej przetwarzania"]` |
+| `term_legal_basis` | keyword[] | `["zgoda osoby, której dane dotyczą"]` |
+| `term_corrective_measure` | keyword[] | `["administracyjna kara pieniężna"]` |
+| `term_sector` | keyword[] | `["Zdrowie"]` |
+| `related_uodo_rulings` | text[] | `["DKN.5131.9.2021", "ZSOŚS.440.21.2019"]` |
+| `related_acts` | text[] | `["Dz.U. 2019 poz. 1781"]` |
+| `related_eu_acts` | text[] | `["EU 2016/679"]` |
 
-### 3.2 Indeksowanie decyzji UODO (uodo_scraper.py + uodo_indexer.py)
+### 3.3 Indeksowanie decyzji UODO
 
-**Etap 1 — Scraping:** `uodo_scraper.py` pobiera decyzje przez REST API portalu `orzeczenia.uodo.gov.pl`. Dla każdej decyzji pobiera:
-- Treść pełną (endpoint `/body.txt`)
-- Metadane: tytuł, tagi, podmioty, rodzaj decyzji (`/meta.json`)
-- Daty ogłoszenia i publikacji (`/dates.json`)
-- Powiązania z innymi aktami (`refs` z meta.json + ekstrakcja z treści regexem)
+**Etap 1 — Scraping:** `uodo_scraper.py` pobiera decyzje przez REST API portalu `orzeczenia.uodo.gov.pl`. Dla każdej decyzji pobiera treść pełną, metadane (tytuł, tagi, podmioty, rodzaj decyzji), daty i powiązania z innymi aktami.
 
-Powiązania są wyciągane dwutorowo: z pola `refs` w meta.json (jeśli API je zwraca) oraz fallbackiem przez wyrażenia regularne z treści decyzji — wzorce dla `Dz.U. XXXX poz. XXXX`, `EU 2016/679`, sygnatur UODO i wyroków NSA/WSA.
+Powiązania z innymi aktami są wyciągane dwutorowo: z API (`refs` w meta.json) oraz fallbackiem przez wyrażenia regularne bezpośrednio z treści decyzji — wzorce dla `Dz.U. XXXX poz. XXXX`, `EU 2016/679`, sygnatur UODO i wyroków NSA/WSA.
 
-**Etap 2 — Wzbogacenie taksonomii:** `enrich_jsonl_taxonomy.py` mapuje pole `meta.terms[]` z API (numerowane etykiety jak `1.1`, `2.3`, `9.1`) na konkretne pola semantyczne (`term_decision_type`, `term_violation_type` itd.). Prefix numeru etykiety determinuje kategorię.
+**Etap 2 — Wzbogacenie taksonomii:** `enrich_jsonl_taxonomy.py` mapuje numerowane etykiety z API (np. `1.1`, `2.3`, `9.1`) na konkretne pola semantyczne. Prefix numeru determinuje kategorię:
+- `1.x` → `term_decision_type` (rodzaj decyzji)
+- `2.x` → `term_violation_type` (rodzaj naruszenia)
+- `9.x` → `term_sector` (sektor)
 
-**Etap 3 — Indeksowanie:** `uodo_indexer.py` buduje tekst do embeddingu (sygnatura + tytuł + tagi + fragment treści + powołane akty), generuje wektor przez model SentenceTransformers i zapisuje punkt do Qdrant. UUID punktu jest deterministyczny — wyznaczany przez MD5 sygnatury.
+**Etap 3 — Indeksowanie:** `uodo_indexer.py` buduje tekst do embeddingu — to nie jest surowa treść decyzji, ale jej skondensowana reprezentacja:
 
-### 3.3 Indeksowanie ustawy (uodo_act_indexer.py)
+```
+DKN.5110.16.2022 Przetwarzanie danych zdrowotnych bez podstawy prawnej prawomocna
+Słowa kluczowe: dane genetyczne, zdrowie, brak podstawy prawnej, Art. 9 RODO
+Podmiot: Szpital Miejski w Krakowie
 
-Ustawa dostarczona jest jako plik Markdown (`D20191781L.md`). Parser rozpoznaje nagłówki artykułów (`Art. X.`) i wyodrębnia ich treść. Artykuły dłuższe niż 3000 znaków są dzielone na chunki z overlapem 300 znaków, żeby kontekst nie był urwany w połowie zdania.
+[pierwsze 5500 znaków treści decyzji]
 
-Każdy chunk otrzymuje `doc_type = "legal_act_article"` i unikalne `doc_id` w formacie `uodo_act:Dz.U. 2019 poz. 1781:artX:chunkY`.
+Akty: Dz.U. 2019 poz. 1781 EU 2016/679
+```
 
-### 3.4 Indeksowanie RODO (rodo_indexer.py)
+Sygnatura i tytuł na początku mają najwyższą wagę przy wyszukiwaniu semantycznym. UUID punktu jest deterministyczny — wyznaczany przez MD5 sygnatury, więc ponowne indeksowanie tej samej decyzji nadpisuje poprzedni punkt zamiast tworzyć duplikat.
 
-Plik `rodo_2016_679_pl.md` zawiera pełny tekst RODO. Parser rozróżnia dwa typy:
-- **Motywy** — linie zaczynające się od `- (N) treść`, typ `gdpr_recital`
-- **Artykuły** — nagłówki `# Artykuł N`, typ `gdpr_article`
+### 3.4 Indeksowanie ustawy i RODO
 
-Długie artykuły również są chunkowane (max 1200 znaków, overlap 100 znaków).
+**Ustawa u.o.d.o.** — parser rozpoznaje nagłówki artykułów (`Art. X.`) w pliku Markdown i wyodrębnia ich treść. Artykuły dłuższe niż 3000 znaków są dzielone na mniejsze fragmenty (chunki) z overlapem 300 znaków — overlap zapobiega urwaniu kontekstu na granicy fragmentów.
+
+**RODO** — parser rozróżnia motywy preambuły (`- (N) treść`) i artykuły (`# Artykuł N`). Motywy nie są dzielone (są krótkie i stanowią zamkniętą całość). Artykuły dłuższe niż 1200 znaków są chunkowane z overlapem 100 znaków.
 
 ---
 
 ## 4. Przepływ danych — od zapytania do odpowiedzi
 
-Poniżej pełny przepływ dla typowego zapytania, np. "Jakie decyzje dotyczą danych genetycznych?":
+To jest najważniejsza sekcja — opisuje dokładnie co dzieje się od momentu gdy użytkownik wpisuje pytanie do momentu gdy widzi odpowiedź. Poniżej skrócony schemat przepływu, a następnie szczegółowy opis każdego kroku na dwóch przykładach:
 
 ```
 Użytkownik wpisuje zapytanie
@@ -168,6 +196,348 @@ Użytkownik wpisuje zapytanie
     AgentMemory ← MemoryEntry(query, sygnatury, snippet)
 ```
 
+Prześledzę cały proces na dwóch przykładach:
+
+- **Przykład A**: krótkie, precyzyjne zapytanie — `"Dane genetyczne"`
+- **Przykład B**: długie, opisowe zapytanie — `"Jakie obowiązki ma pracodawca przy monitoringu wizyjnym pracowników?"`
+
+---
+
+### Krok 0 — Użytkownik wpisuje zapytanie
+
+Użytkownik wpisuje tekst w polu wyszukiwania i klika "Szukaj".
+
+Aplikacja sprawdza najpierw czy zapytanie wygląda jak sygnatura decyzji (np. `DKN.5110.16.2022`) — jeśli tak, pomija całą logikę wyszukiwania i bezpośrednio pobiera tę decyzję z Qdrant. To tzw. **fast path**.
+
+Dla obu naszych przykładów zapytania nie są sygnaturami, więc przechodzimy do normalnego przepływu.
+
+---
+
+### Krok 1 — Reasoning Step (dekompozycja zapytania)
+
+**Co to jest i po co?**
+
+Zanim zaczniemy szukać dokumentów, LLM analizuje zapytanie i wyciąga z niego ustrukturyzowane informacje. To jak briefing przed wyszukiwaniem — zamiast iść do biblioteki z kartką "dane genetyczne", idziemy z pełną listą: jakich dokumentów szukamy, które artykuły mogą być istotne, z jakiego okresu.
+
+Ten krok jest uruchamiany **tylko dla zapytań dłuższych niż 3 słowa** i tylko gdy AI jest włączone.
+
+**Przykład A (`"Dane genetyczne"`)** — 2 słowa, krok pominięty. Zapytanie trafia dalej bez modyfikacji.
+
+**Przykład B (`"Jakie obowiązki ma pracodawca przy monitoringu wizyjnym pracowników?"`)** — 8 słów, krok uruchamiany.
+
+LLM otrzymuje zapytanie i zwraca JSON z analizą:
+
+```json
+{
+  "query_type": "szukam_decyzji",
+  "search_keywords": [
+    "monitoring wizyjny",
+    "monitoring w miejscu pracy",
+    "kamera w pracy",
+    "nadzór nad pracownikami"
+  ],
+  "gdpr_articles_hint": ["Art. 5", "Art. 6", "Art. 9", "Art. 88"],
+  "uodo_act_articles_hint": ["Art. 22²"],
+  "year_from_hint": null,
+  "year_to_hint": null,
+  "enriched_query": "monitoring wizyjny kamera pracodawca pracownicy obowiązki informacyjne podstawa prawna",
+  "reasoning": "Pytanie dotyczy monitoringu wizyjnego w miejscu pracy — kluczowe są Kodeks pracy Art. 22² oraz RODO Art. 88."
+}
+```
+
+Z tego wyniku aplikacja wyciąga:
+- `search_keywords[:3]` → `"monitoring wizyjny monitoring w miejscu pracy kamera w pracy"` — to zostanie użyte do wyszukiwania semantycznego
+- `gdpr_articles_hint` i `uodo_act_articles_hint` → widoczne użytkownikowi w sekcji "Reasoning Step"
+- `year_from_hint`/`year_to_hint` → gdyby były ustawione, zawęziłyby wyniki do danego okresu
+
+**Dlaczego `search_keywords` zamiast `enriched_query`?**
+
+`enriched_query` to często długie zdanie opisowe, które przy zamianie na wektor "rozmywa" znaczenie — embedding próbuje reprezentować zbyt wiele różnych pojęć naraz. Kilka konkretnych fraz kluczowych (`"monitoring wizyjny monitoring w miejscu pracy"`) daje bardziej skupiony wektor i trafniejsze wyniki semantyczne.
+
+---
+
+### Krok 2 — Hybrid Search (wyszukiwanie hybrydowe)
+
+**Co to jest?**
+
+"Hybrid" oznacza że łączymy dwie techniki: wyszukiwanie po tagach (dokładne) i wyszukiwanie semantyczne (rozumie sens). Wyniki są zbierane do trzech osobnych "kubełków" — decyzji UODO, artykułów u.o.d.o. i artykułów RODO — z różnymi limitami dla każdego.
+
+**Skąd bierze się oryginalne vs. wzbogacone zapytanie?**
+
+Do wyszukiwania po tagach zawsze używamy **oryginalnego zapytania** użytkownika — frazy "monitoring wizyjny" które on wpisał, nie te wymyślone przez LLM. Do wyszukiwania semantycznego używamy **`search_keywords`** z dekompozycji — bardziej skupionego zestawu pojęć.
+
+#### Kubełek 1 — Decyzje UODO (bez limitu liczby)
+
+Wypełniany w czterech krokach z malejącym priorytetem:
+
+**Krok 1a — explicit keyword z UI:**
+Użytkownik może wybrać konkretny tag z listy w sekcji "Filtry zaawansowane". Jeśli wybrał np. `"monitoring wizyjny"`, aplikacja pobiera z Qdrant **wszystkie** decyzje z tym tagiem bez żadnego limitu — może to być 15, 50 lub 200 dokumentów.
+
+Dla obu naszych przykładów zakładamy że użytkownik nie ustawił ręcznie tagu, więc krok 1a jest pominięty.
+
+**Krok 1b — frazy z zapytania (BEZ LLM):**
+
+To kluczowy krok. Aplikacja wyciąga z oryginalnego zapytania wszystkie możliwe frazy 2-wyrazowe i sprawdza czy któraś z nich jest tagiem w bazie.
+
+```
+Przykład A: query = "Dane genetyczne"
+  words = ["dane", "genetyczne"]
+  frazy 2-wyrazowe = ["dane genetyczne"]
+  
+  Sprawdzamy czy "dane genetyczne" jest tagiem w bazie → TAK
+  → keyword_exact_search("dane genetyczne") → 26 decyzji
+  
+  Krok 1b zakończony sukcesem. Kroki 1c i 1d pominięte.
+
+Przykład B: query = "Jakie obowiązki ma pracodawca przy monitoringu wizyjnym pracowników?"
+  words = ["jakie", "obowiązki", "pracodawca", "przy", "monitoringu", "wizyjnym", "pracowników"]
+  → po usunięciu stopwords: ["obowiązki", "pracodawca", "monitoringu", "wizyjnym", "pracowników"]
+  frazy 2-wyrazowe = ["obowiązki pracodawca", "pracodawca monitoringu", 
+                      "monitoringu wizyjnym", "wizyjnym pracowników"]
+  
+  Sprawdzamy każdą:
+  "obowiązki pracodawca" → nie jest tagiem
+  "pracodawca monitoringu" → nie jest tagiem
+  "monitoringu wizyjnym" → nie jest tagiem (tag to "monitoring wizyjny" bez odmiany!)
+  "wizyjnym pracowników" → nie jest tagiem
+  
+  Krok 1b: zero trafień → przechodzimy do 1c
+```
+
+Uwaga na odmianę — to znane ograniczenie systemu tagów. Tag w bazie to `"monitoring wizyjny"` (mianownik), ale w zapytaniu pojawia się `"monitoringu wizyjnym"` (odmiana). Porównanie działa na poziomie tekstu, nie lemmatyzacji. Dlatego istnieje krok 1c z LLM.
+
+**Krok 1c — tagi LLM (fallback):**
+
+Uruchamiany tylko gdy krok 1b nic nie znalazł. LLM dostaje pełną listę tagów z bazy i wybiera pasujące do zapytania. Może obsługiwać synonimy i odmiany.
+
+```
+Przykład B — LLM dostaje listę tagów i zapytanie:
+  → proponuje: ["monitoring wizyjny", "monitoring w miejscu pracy", 
+                "obowiązek informacyjny", "zatrudnienie"]
+  
+  Filtrujemy — odrzucamy tagi zwracające >50 decyzji (zbyt ogólne):
+  "monitoring wizyjny" → np. 23 decyzje → OK → keyword_exact_search → 23 decyzje
+  "monitoring w miejscu pracy" → np. 8 decyzji → OK → +8 decyzji (deduplikacja)
+  "obowiązek informacyjny" → np. 180 decyzji → ZBYT OGÓLNY → pomijamy
+  "zatrudnienie" → to tag taksonomii sektora, nie słowo kluczowe → pomijamy
+
+  Wynik: ~25-30 decyzji o monitoringu
+```
+
+Limit 50 decyzji per tag jest ochroną przed zaśmieceniem wyników — tagi jak "dane osobowe" czy "zgoda" pasują do większości bazy i są bezużyteczne jako filtr.
+
+**Krok 1d — semantic search (ostatni fallback):**
+
+Uruchamiany tylko gdy mamy mniej niż 5 decyzji po krokach 1a-1c. Używa wektora z `search_keywords` i szuka podobieństwa kosinusowego w przestrzeni embeddingów.
+
+```
+Przykład: query o bardzo niszowym temacie bez tagu w bazie
+  "Czy inspektor sanitarny może żądać danych osobowych pacjentów?"
+  
+  Krok 1b: brak dwuwyrazowych fraz będących tagiem
+  Krok 1c: LLM proponuje tagi, ale żaden nie zwraca wyników
+  Krok 1d: semantic_search("inspektor sanitarny dane osobowe pacjentów", top_k=20, threshold=0.45)
+  
+  Qdrant oblicza odległość kosinusową między wektorem zapytania
+  a wektorami wszystkich ~560 decyzji.
+  Zwraca 20 najbardziej podobnych semantycznie.
+```
+
+Próg `0.45` jest wysoki (skala 0-1) — oznacza że zwracamy tylko decyzje o silnym podobieństwie semantycznym. Pozwala to uniknąć zupełnie niepowiązanych wyników.
+
+#### Kubełek 2 — Artykuły u.o.d.o. (max 5)
+
+Dla obu przykładów: semantic search z `search_keywords` w typie `legal_act_article`, próg `0.25`.
+
+```
+Przykład A: search_keywords = "dane genetyczne" (brak dekompozycji)
+  → Art. 14 u.o.d.o. (dane szczególnych kategorii) — score 0.71
+  → Art. 9 u.o.d.o. (przetwarzanie szczególnych kategorii) — score 0.68
+  → Art. 88 u.o.d.o. (przetwarzanie w zatrudnieniu) — score 0.31
+
+Przykład B: search_keywords = "monitoring wizyjny monitoring w miejscu pracy kamera w pracy"
+  → Art. 22² u.o.d.o. (monitoring w zakładzie pracy) — score 0.89
+  → Art. 12 u.o.d.o. (obowiązki informacyjne) — score 0.54
+  → Art. 9 u.o.d.o. (dane szczególnych kategorii) — score 0.28
+```
+
+#### Kubełek 3 — Artykuły RODO (max 3)
+
+Analogicznie, próg `0.30` (wyższy = bardziej rygorystyczny = mniej wyników).
+
+```
+Przykład A:
+  → Art. 4 ust. 13 RODO (definicja danych genetycznych) — score 0.82
+  → Art. 9 RODO (przetwarzanie szczególnych kategorii) — score 0.79
+  → Motyw 34 RODO (dane genetyczne a zdrowie) — score 0.61
+
+Przykład B:
+  → Art. 88 RODO (przetwarzanie w kontekście zatrudnienia) — score 0.77
+  → Art. 5 RODO (zasady przetwarzania) — score 0.52
+  → Art. 13 RODO (obowiązek informacyjny) — score 0.48
+```
+
+#### Graf cytowań — rozszerzenie wyników
+
+Po zebraniu decyzji z kubełka 1, aplikacja używa grafu cytowań żeby dodać powiązane decyzje. Graf to sieć cytowań między decyzjami — jeśli decyzja A cytuje decyzję B, między nimi jest krawędź.
+
+```
+Przykład A — znaleziono 26 decyzji z tagiem "dane genetyczne":
+  Seed sigs = [DKN.5110.16.2022, DKN.5131.9.2021, ...]
+  
+  graph_expand() sprawdza dla każdej znalezionej decyzji:
+  - Które decyzje ona cytuje? (następniki) → dodaj z wagą 0.6
+  - Które decyzje ją cytują? (poprzedniki) → dodaj z wagą 0.5
+  
+  Wynik: np. DKN.5132.4.2023 nie ma tagu "dane genetyczne",
+  ale cytuje 3 decyzje z naszej listy → trafia do zakładki "Graf"
+  z informacją "cytuje tę decyzję"
+```
+
+Waga `0.6` i `0.5` (i jej spadek o `0.65` przy każdym kolejnym poziomie głębokości) służy do sortowania — decyzje bezpośrednio powiązane są wyżej niż te powiązane przez pośrednika.
+
+**Wynik końcowy wyszukiwania:**
+
+```
+Przykład A ("Dane genetyczne"):
+  → 26 decyzji z tagu "dane genetyczne"
+  → +3 z grafu (cytują decyzje z listy)
+  → +3 artykuły u.o.d.o.
+  → +3 artykuły RODO
+  Razem: 35 dokumentów, czas: ~2-5 sekund
+
+Przykład B ("Jakie obowiązki ma pracodawca przy monitoringu..."):
+  → ~25-30 decyzji z tagów (monitoring wizyjny, monitoring w miejscu pracy)
+  → +kilka z grafu
+  → +3-5 artykułów u.o.d.o.
+  → +3 artykuły RODO
+  Razem: ~35-40 dokumentów, czas: ~5-15 sekund (+ czas dekompozycji LLM)
+```
+
+---
+
+### Krok 3 — Build Context (budowanie kontekstu dla LLM)
+
+**Co to jest kontekst?**
+
+Kontekst to tekst który zostanie dosłownie wklejony do promptu dla modelu LLM. To jak teczka z dokumentami którą dajemy prawnikowi przed konsultacją — bez niej odpowie z pamięci, z nią odpowie na podstawie konkretnych akt.
+
+**Sortowanie:**
+
+Przed budowaniem kontekstu dokumenty są sortowane — decyzje UODO zawsze pierwsze, RODO ostatnie. To ważne, bo modele językowe mają tendencję do "zapominania" informacji z środka długiego tekstu. Umieszczenie decyzji UODO na początku gwarantuje że model je przetworzy.
+
+**Limit 18 000 znaków:**
+
+Modele mają ograniczone "okno kontekstowe" — maksymalną liczbę znaków którą mogą przetworzyć naraz. Aplikacja buduje kontekst dokument po dokumencie, aż do osiągnięcia limitu 18 000 znaków. Gdy limit jest osiągnięty, dodaje notatkę `[pominięto N dalszych wyników]`.
+
+Dla 26 decyzji o danych genetycznych — decyzje mają średnio 500-2000 znaków fragmentu (fragment, nie pełna treść), więc do limitu wejdzie ~10-20 decyzji plus wszystkie artykuły u.o.d.o. i RODO.
+
+**Ekstrakcja fragmentów:**
+
+Decyzje UODO mogą mieć do 50 000 znaków, ale do kontekstu trafia max 2000 znaków. Algorytm przesuwa okno o 150 znaków po całej treści decyzji i liczy ile razy słowa kluczowe z zapytania pojawiają się w każdym oknie. Wybiera okno z najwyższym wynikiem.
+
+```
+Przykład: decyzja DKN.5110.16.2022 (20 000 znaków)
+  Zapytanie: "dane genetyczne"
+  Słowa kluczowe: ["dane", "genetyczne"]
+  
+  Okno na pozycji 0-2000:     "dane genetyczne" pojawia się 0 razy → score=0
+  Okno na pozycji 150-2150:   "dane genetyczne" pojawia się 0 razy → score=0
+  ...
+  Okno na pozycji 4500-6500:  "dane genetyczne" pojawia się 4 razy → score=4 ← NAJLEPSZE
+  Okno na pozycji 4650-6650:  "dane genetyczne" pojawia się 3 razy → score=3
+  
+  Wybrany fragment: znaki 4500-6500 (z prefiksem "[…]" jeśli nie zaczyna od początku)
+```
+
+**Przykład gotowego kontekstu (uproszczony):**
+
+```
+Poniżej znajdują się dokumenty powiązane z pytaniem: «Dane genetyczne»
+Zbiór zawiera trzy typy dokumentów:
+  1. DECYZJE UODO — decyzje administracyjne Prezesa UODO
+  2. ARTYKUŁY u.o.d.o. — przepisy ustawy o ochronie danych osobowych
+  3. ARTYKUŁY RODO — przepisy rozporządzenia (UE) 2016/679
+Odpowiadaj na podstawie poniższych dokumentów, ze szczególnym uwzględnieniem DECYZJI UODO.
+
+---
+[1] DECYZJA UODO DKN.5110.16.2022 (2022-08, prawomocna)
+  SYGNATURA:     DKN.5110.16.2022
+  DATA:          2022-08
+  STATUS:        prawomocna
+  TAGI:          dane genetyczne, zdrowie, brak podstawy prawnej
+  POWOŁANE AKTY: Dz.U. 2019 poz. 1781, EU 2016/679
+  TREŚĆ:
+  […]
+  Prezes Urzędu stwierdził, że Szpital przetwarzał dane genetyczne pacjentów
+  bez ważnej podstawy prawnej. Zgodnie z art. 9 ust. 1 RODO dane genetyczne
+  należą do szczególnych kategorii danych osobowych, których przetwarzanie
+  jest co do zasady zakazane...
+
+---
+[2] DECYZJA UODO DKN.5131.9.2021 (2021-03, prawomocna)
+  ...
+
+---
+[15] USTAWA o ochronie danych osobowych — Art. 9
+  ŹRÓDŁO: Dz.U. 2019 poz. 1781 (u.o.d.o.)
+  TREŚĆ:
+  Art. 9. Przetwarzanie danych szczególnych kategorii...
+
+---
+[16] RODO (rozporządzenie 2016/679) — Art. 9
+  ŹRÓDŁO: Dz.Urz. UE L 119/1
+  TREŚĆ:
+  Artykuł 9 RODO — Przetwarzanie szczególnych kategorii danych osobowych...
+```
+
+---
+
+### Krok 4 — LLM Stream (generowanie odpowiedzi)
+
+**Co się dzieje?**
+
+Aplikacja wysyła do modelu LLM dwa elementy:
+1. **System prompt** — instrukcja dla modelu (odpowiadaj po polsku, cytuj sygnatury, nie zmyślaj)
+2. **User message** — zapytanie użytkownika + cały kontekst z Kroku 3
+
+Model generuje odpowiedź token po tokenie (słowo po słowie) — to właśnie streamowanie. Użytkownik widzi jak tekst pojawia się na ekranie w czasie rzeczywistym, zamiast czekać na gotową odpowiedź.
+
+**Przykład odpowiedzi dla zapytania A ("Dane genetyczne"):**
+
+```
+Na podstawie dostarczonych decyzji UODO można wskazać następujące kluczowe 
+ustalenia dotyczące przetwarzania danych genetycznych:
+
+**Definicja i podstawa prawna**
+Dane genetyczne są szczególną kategorią danych osobowych w rozumieniu 
+Art. 9 ust. 1 RODO i Art. 4 pkt 13 RODO. Ich przetwarzanie jest co do zasady 
+zakazane, chyba że zachodzi jedna z przesłanek z Art. 9 ust. 2 RODO.
+
+**Decyzje w sprawach placówek medycznych**
+W decyzji DKN.5110.16.2022 Prezes UODO stwierdził naruszenie przez szpital 
+przepisów o ochronie danych genetycznych pacjentów — administrator nie posiadał 
+ważnej podstawy prawnej i nałożył karę pieniężną...
+
+**Decyzje w sprawach badań naukowych**
+Decyzja DKN.5131.9.2021 dotyczyła przetwarzania danych genetycznych w ramach 
+badań naukowych — Prezes UODO wskazał że zgoda uczestnika musi być...
+```
+
+LLM cytuje konkretne sygnatury i artykuły bo system prompt go do tego zobowiązuje, a kontekst dostarcza mu gotowe informacje do zacytowania.
+
+---
+
+### Krok 5 — Wyświetlenie w Streamlit
+
+Odpowiedź AI pojawia się w niebieskiej ramce na górze. Poniżej — zakładki z dokumentami które zostały znalezione i użyte jako podstawa odpowiedzi. Użytkownik może kliknąć w sygnaturę decyzji żeby przejść bezpośrednio do pełnej treści na portalu UODO.
+
+---
+
+### Krok 6 — Zapis do pamięci epizodycznej
+
+Zapytanie, lista znalezionych decyzji i fragment odpowiedzi są zapisywane w pamięci sesji. Przy kolejnym podobnym zapytaniu LLM dostanie dodatkową notatkę "w poprzednim pytaniu o dane genetyczne znalezione zostały decyzje: DKN.5110.16.2022..." — to pozwala na kontynuację rozmowy bez ponownego wyszukiwania.
+
 ---
 
 ## 5. Moduł wyszukiwania (search.py)
@@ -176,115 +546,60 @@ To serce aplikacji. Funkcja `hybrid_search()` realizuje wieloetapową strategię
 
 ### 5.1 Semantic search
 
-`semantic_search()` przyjmuje zapytanie, generuje jego embedding i pyta Qdrant o najbliższe wektory:
+`semantic_search()` przyjmuje zapytanie, generuje jego embedding i pyta Qdrant o najbliższe wektory. Qdrant używa algorytmu ANN (Approximate Nearest Neighbor) — zamiast porównywać zapytanie ze wszystkimi 560+ decyzjami po kolei (co byłoby wolne), używa indeksu który pozwala na bardzo szybkie znalezienie najbliższych wektorów.
 
-```python
-def semantic_search(query, top_k=8, filters=None, score_threshold=0.25):
-    vec = embed(query)          # SentenceTransformers → lista floatów
-    res = client.query_points(  # ANN (Approximate Nearest Neighbor)
-        query=vec,
-        limit=top_k,
-        query_filter=_build_qdrant_filter(filters),
-        score_threshold=score_threshold,  # odcięcie nieistotnych wyników
-    )
-```
-
-`score_threshold` jest konfigurowalny per wywołanie — dla decyzji UODO w fallbacku używamy `0.45` (rygorystyczny), dla u.o.d.o. `0.25`, dla RODO `0.3`. Wyższy próg = mniej, ale trafniejszych wyników.
-
-`_build_qdrant_filter()` buduje obiekt `Filter(must=[...])` z Qdrant na podstawie słownika filtrów UI — statusu, roku, typów dokumentów, pól taksonomicznych itd.
+Parametr `score_threshold` to minimalne podobieństwo kosinusowe które musi mieć dokument żeby trafić do wyników. Skala 0-1 gdzie 1 oznacza identyczne wektory:
+- Dla decyzji UODO w fallbacku: `0.45` — rygorystyczny, tylko bardzo podobne
+- Dla u.o.d.o.: `0.25` — łagodniejszy, artykuły ustawy są stylistycznie różne od zapytań
+- Dla RODO: `0.30` — pośredni
 
 ### 5.2 Keyword exact search
 
-`keyword_exact_search()` to scroll bez limitu liczby wyników — pobiera **wszystkie** dokumenty z danym tagiem:
+`keyword_exact_search()` to scroll bez limitu liczby wyników — pobiera **wszystkie** dokumenty z danym tagiem. To kluczowa różnica względem semantic search — tam jest limit `top_k`, tutaj nie ma. Dzięki temu dla zapytania "dane genetyczne" pobieramy wszystkie 26 decyzji, nie tylko top-8.
 
-```python
-def keyword_exact_search(keyword, filters=None):
-    # Dodaje keyword do filtrów jako FieldCondition na polu "keywords"
-    kw_filters = {**filters, "keyword": keyword}
-    # Scroll z paginacją po 100 punktów
-    while True:
-        pts, next_offset = client.scroll(scroll_filter=..., limit=100)
-        docs.extend(pts)
-        if next_offset is None: break
-```
+Scroll działa stronami po 100 dokumentów — jeśli jest 300 decyzji z tagiem, funkcja wykona 3 zapytania do Qdrant.
 
-To kluczowa różnica względem `semantic_search` — tam jest `limit=top_k`, tutaj nie ma limitu. Dzięki temu dla zapytania "dane genetyczne" pobieramy wszystkie 26 decyzji, nie tylko top-8.
+### 5.3 Limit per tag
 
-### 5.3 Logika hybrid_search — szczegółowo
-
-Funkcja prowadzi trzy osobne buckety: `decisions`, `act_docs`, `gdpr_docs`. Każdy bucket jest wypełniany niezależnie.
-
-**Bucket decyzji UODO (bez limitu):**
-
-```
-Krok 1a — explicit keyword z UI:
-  Użytkownik wybrał tag z listy → keyword_exact_search
-  Przykład: filtr "zgoda" → wszystkie decyzje z tagiem "zgoda"
-
-Krok 1b — frazy bezpośrednio z zapytania (BEZ LLM):
-  query = "dane genetyczne pacjentów szpitala"
-  words = ["dane", "genetyczne", "pacjentów", "szpitala"]
-  frazy = ["dane", "genetyczne", "pacjentów", "szpitala",
-           "dane genetyczne", "genetyczne pacjentów", "pacjentów szpitala"]
-  
-  all_tags_lower = {t.lower(): t for t in get_all_tags()}
-  # Sprawdza po kolei:
-  # "dane" → nie jest tagiem
-  # "genetyczne" → nie jest tagiem
-  # "dane genetyczne" → JEST tagiem! → keyword_exact_search("dane genetyczne")
-  # Wynik: 26 decyzji z tagiem "dane genetyczne"
-
-Krok 1c — tagi LLM (fallback gdy 1b nic nie znalazło):
-  Wywołuje LLM z listą dostępnych tagów → LLM proponuje pasujące
-  Używane gdy zapytanie jest opisowe i nie zawiera żadnej frazy będącej tagiem
-  Przykład: "przetwarzanie danych w celach marketingowych bez zgody"
-  LLM może zaproponować: "marketing", "zgoda", "brak podstawy prawnej"
-
-Krok 1d — semantic search (ostatni fallback):
-  Uruchamiany TYLKO gdy decisions < 5
-  top_k=20, score_threshold=0.45
-  Łapie przypadki gdzie fraza w ogóle nie jest tagiem
-```
-
-**Bucket u.o.d.o. (max 5 artykułów):**
-- Najpierw explicit keyword (jeśli ustawiony w UI)
-- Uzupełnienie semantic searchem do limitu 5
-
-**Bucket RODO (max 3 artykuły):**
-- Analogicznie jak u.o.d.o., ale próg semantyczny wyższy (0.3)
-
-**Dlaczego taka kolejność?** Tagi są precyzyjne — "dane genetyczne" to konkretna etykieta przypisana przez ekspertów podczas indeksowania decyzji. Semantic search rozumie sens, ale może zwrócić decyzje o "danych biometrycznych" albo "danych szczególnych kategorii" gdy pytamy o "dane genetyczne" — bo wektory tych fraz są blisko siebie. Frazy bezpośrednie z zapytania są trafniejsze i nie wymagają wywołania LLM.
+Stała `_MAX_RESULTS_PER_TAG = 50` odrzuca tagi które zwracają zbyt wiele wyników — są zbyt ogólne żeby być użyteczne. Tagi jak "przetwarzanie danych osobowych" (pasuje do 400+ decyzji) lub "zgoda" (200+ decyzji) zaśmiecają wyniki zamiast je filtrować. Tag "dane genetyczne" (26 decyzji) jest precyzyjny i użyteczny.
 
 ### 5.4 Deduplikacja
 
-Funkcja `doc_key()` generuje unikalny klucz dla każdego dokumentu. Zbiór `seen_keys` pilnuje, żeby ten sam dokument nie trafił do wyników dwukrotnie — nawet jeśli pasuje do kilku tagów jednocześnie.
+Funkcja `doc_key()` generuje unikalny klucz dla każdego dokumentu. Zbiór `seen_keys` pilnuje żeby ten sam dokument nie trafił do wyników dwukrotnie — decyzja może pasować do kilku tagów jednocześnie, ale powinna pojawić się tylko raz.
 
 ---
 
 ## 6. Graf powiązań
 
-Graf jest budowany raz (przy pierwszym uruchomieniu) i zapisywany do pliku `uodo_graph.pkl`. Przy kolejnych uruchomieniach jest wczytywany z dysku.
+Graf jest budowany raz (przy pierwszym uruchomieniu) i zapisywany do pliku `uodo_graph.pkl`. Przy kolejnych uruchomieniach jest wczytywany z dysku w ułamku sekundy.
 
 ### 6.1 Budowanie grafu
 
-```python
+```
 G = nx.DiGraph()  # graf skierowany
-# Węzły = sygnatury decyzji
-# Krawędzie = cytowania między decyzjami
-# Typy relacji: CITES_UODO, CITES_ACT, CITES_EU
+
+Węzły = sygnatury decyzji
+Krawędzie = cytowania między decyzjami
+Typy relacji: CITES_UODO, CITES_ACT, CITES_EU
 ```
 
-Dla każdej decyzji w Qdrant tworzony jest węzeł, a pole `related_uodo_rulings` (lista sygnatur cytowanych decyzji) zamieniane jest na krawędzie skierowane.
+Dla każdej decyzji w Qdrant tworzony jest węzeł, a pole `related_uodo_rulings` zamieniane jest na krawędzie skierowane:
+
+```
+DKN.5110.16.2022  ──CITES_UODO──►  DKN.5131.9.2021
+DKN.5110.16.2022  ──CITES_ACT───►  Dz.U. 2019 poz. 1781
+DKN.5110.16.2022  ──CITES_EU────►  EU 2016/679
+```
 
 ### 6.2 Rozszerzanie wyników
 
-Po znalezieniu decyzji przez wyszukiwanie (`seed_sigs`), `graph_expand()` przechodzi po grafie w dwóch kierunkach:
+Po znalezieniu decyzji przez wyszukiwanie, `graph_expand()` przechodzi po grafie w obu kierunkach:
 - **Następniki** (decyzje cytowane przez znalezione) — relacja "cytowana", waga 0.6
-- **Poprzedniki** (decyzje, które cytują znalezione) — relacja "cytuje tę decyzję", waga 0.5
+- **Poprzedniki** (decyzje które cytują znalezione) — relacja "cytuje tę decyzję", waga 0.5
 
-Waga maleje z głębią grafu (`decay = 0.65^d`), żeby decyzje bezpośrednio powiązane miały wyższy priorytet niż te powiązane przez pośrednika. Maksymalnie 15 dodatkowych decyzji z grafu, maksymalna głębokość 2.
+Waga maleje z głębią grafu (`decay = 0.65^d`) — decyzje bezpośrednio powiązane mają wyższy priorytet. Maksymalnie 15 dodatkowych decyzji z grafu, głębokość 2.
 
-Rozszerzenie grafu ma sens, bo jeśli znaleziona decyzja jest precedensem, to decyzje ją cytujące są prawdopodobnie tematycznie powiązane — nawet jeśli nie zawierają szukanej frazy.
+Rozszerzenie grafu ma sens prawnie: jeśli znalazłeś decyzję A (precedens), to decyzje które ją cytują prawdopodobnie stosują te same zasady w podobnych sprawach — nawet jeśli używają różnego słownictwa i nie trafią przez wyszukiwanie tagowe.
 
 ---
 
@@ -292,46 +607,25 @@ Rozszerzenie grafu ma sens, bo jeśli znaleziona decyzja jest precedensem, to de
 
 ### 7.1 Reasoning Step — dekompozycja zapytania
 
-Przed wyszukiwaniem, dla zapytań dłuższych niż 3 słowa, LLM analizuje pytanie i generuje strukturę `QueryDecomposition`:
+Przed wyszukiwaniem, dla zapytań dłuższych niż 3 słowa, LLM analizuje pytanie i generuje strukturę `QueryDecomposition` zawierającą: typ zapytania, słowa kluczowe do semantic search, wskazówki artykułów, ewentualne zawężenie dat i uzasadnienie.
 
-```python
-class QueryDecomposition(BaseModel):
-    query_type: QueryType          # szukam_decyzji / szukam_przepisu / analiza_ogólna / pytanie_faktyczne
-    search_keywords: list[str]     # synonimy prawne (max 5)
-    gdpr_articles_hint: list[str]  # np. ["Art. 9", "Art. 17"]
-    uodo_act_articles_hint: list[str]
-    year_from_hint: int | None     # zawężenie dat
-    year_to_hint: int | None
-    enriched_query: str            # rozszerzone zapytanie do semantic search
-    reasoning: str                 # uzasadnienie (widoczne w UI)
-```
-
-Prompt do LLM wymaga odpowiedzi wyłącznie w formacie JSON. Wynik jest parsowany przez Pydantic — jeśli parsowanie się nie powiedzie, używane jest oryginalne zapytanie.
-
-`enriched_query` trafia do semantic search zamiast oryginalnego zapytania — np. "dane genetyczne" może zostać rozszerzone do "przetwarzanie danych genetycznych pacjentów ochrona zdrowia RODO Art. 9".
-
-`year_from_hint` i `year_to_hint` są automatycznie dodawane do filtrów Qdrant, jeśli użytkownik nie ustawił dat ręcznie.
+Prompt do LLM wymaga odpowiedzi wyłącznie w formacie JSON. Wynik jest parsowany przez Pydantic — jeśli parsowanie się nie powiedzie (model odpowie w złym formacie), używane jest oryginalne zapytanie jako fallback.
 
 ### 7.2 Dobór tagów przez LLM
 
-`extract_tags_with_llm()` wysyła do LLM listę wszystkich tagów z bazy i prosi o wybór pasujących. Odpowiedź jest parsowana linijka po linijce — LLM może wskazać istniejące tagi (dokładna pisownia) lub zaproponować nowe (z prefiksem `[NOWY]`).
-
-Nowe tagi (spoza listy) mogą trafić do wyszukiwania, ale w Qdrant nie znajdą żadnych dokumentów — są użyteczne tylko jako sygnał dla semantic search. Funkcja zwraca max 8 tagów z listy + 2 nowe.
+`extract_tags_with_llm()` wysyła do LLM pełną listę tagów z bazy (~400-600 tagów) i prosi o wybór pasujących. LLM może wskazać istniejące tagi (dokładna pisownia) lub zaproponować nowe (z prefiksem `[NOWY]`).
 
 Ta funkcja jest wywoływana zawsze, ale wynik jest używany **tylko jako fallback** (krok 1c) — gdy bezpośrednie dopasowanie fraz z zapytania nic nie znalazło.
 
 ### 7.3 Streamowanie odpowiedzi
 
-`call_llm_stream()` generuje tokeny asynchronicznie. W przypadku Ollama Cloud parsuje linie NDJSON (każda linia to JSON z polem `message.content`). W przypadku Groq używa oficjalnego SDK z `stream=True`.
+`call_llm_stream()` generuje tokeny asynchronicznie przez API Ollama (`/api/chat` z `"stream": true`). Każda linia odpowiedzi to JSON z polem `message.content` zawierającym kolejny token. Użytkownik widzi tekst pojawiający się na bieżąco.
 
-System prompt instruuje LLM, żeby:
-- odpowiadał wyłącznie po polsku
-- zawsze cytował sygnatury decyzji i numery artykułów
-- wyraźnie poinformował, jeśli kontekst nie zawiera odpowiedzi
+System prompt instruuje LLM, żeby: odpowiadał wyłącznie po polsku, zawsze cytował sygnatury decyzji i numery artykułów, wyraźnie poinformował jeśli kontekst nie zawiera odpowiedzi.
 
 ### 7.4 JSON bez streamowania
 
-`call_llm_json()` służy do wywołań wymagających strukturyzowanego wyjścia (dekompozycja zapytania, dobór tagów). Dla Groq używa `response_format={"type": "json_object"}` — API gwarantuje poprawny JSON. Dla Ollama Cloud używa parametru `"format": "json"`. W obu przypadkach system prompt zawiera instrukcję "Odpowiadaj WYŁĄCZNIE poprawnym JSON. Bez komentarzy."
+`call_llm_json()` służy do wywołań wymagających strukturyzowanego wyjścia (dekompozycja zapytania, dobór tagów). Używa parametru `"format": "json"` w Ollama. Odpowiedź jest czyszczona z ewentualnych bloków markdown (` ```json ``` `) przez regex, a następnie parsowana.
 
 ---
 
@@ -341,70 +635,19 @@ Kontekst to tekst przekazywany do LLM jako "dokumenty". Jego jakość bezpośred
 
 ### 8.1 Sortowanie dokumentów
 
-Przed budowaniem kontekstu dokumenty są sortowane według priorytetu:
+Przed budowaniem kontekstu dokumenty są sortowane według priorytetu (decyzje UODO pierwsze, RODO ostatnie), a w ramach tego samego typu — malejąco po score wyszukiwania.
 
-```python
-_CONTEXT_TYPE_ORDER = {
-    "uodo_decision":     0,   # pierwsze
-    "legal_act_article": 1,
-    "gdpr_article":      2,
-    "gdpr_recital":      3,   # ostatnie
-}
-docs_sorted = sorted(docs, key=lambda d: (
-    _CONTEXT_TYPE_ORDER.get(d.get("doc_type"), 9),
-    -d.get("_score", 0)  # w ramach typu: wyższy score = wyżej
-))
-```
-
-**Dlaczego to ważne?** Duże modele językowe mają tendencję do "zapominania" informacji z środka długiego kontekstu (tzw. "lost in the middle"). Umieszczenie decyzji UODO na początku zapewnia, że model widzi je zanim skończy się limit tokenów.
+Duże modele językowe mają tendencję do "zapominania" informacji z środka długiego kontekstu (tzw. "lost in the middle"). Umieszczenie decyzji UODO na początku gwarantuje że model je przetworzy przed osiągnięciem limitu tokenów.
 
 ### 8.2 Szablony Jinja2
 
-Każdy typ dokumentu ma własny szablon, co pozwala na precyzyjne "zakotwiczenie uwagi" modelu — LLM widzi wyraźne etykiety (`DECYZJA UODO`, `USTAWA`, `RODO`) i nie musi sam kategoryzować dokumentów:
+Każdy typ dokumentu ma własny szablon z wyraźnymi etykietami. LLM widzi `DECYZJA UODO`, `USTAWA`, `RODO` — nie musi sam kategoryzować dokumentów. Wcześniej brak tej informacji w nagłówku powodował, że duże modele (jak kimi2.5) interpretowały kontekst jako "wyłącznie przepisy RODO" i twierdziły że nie ma decyzji UODO.
 
-```
-[1] DECYZJA UODO DKN.5110.16.2022 (2022-08, prawomocna)
-  SYGNATURA:     DKN.5110.16.2022
-  DATA:          2022-08
-  STATUS:        prawomocna
-  TAGI:          dane genetyczne, zdrowie, brak podstawy prawnej
-  POWOŁANE AKTY: Dz.U. 2019 poz. 1781, EU 2016/679
-  TREŚĆ:
-  [fragment treści]
+### 8.3 Ekstrakcja fragmentów i limit znaków
 
----
-[2] USTAWA o ochronie danych osobowych — Art. 9
-  ŹRÓDŁO: Dz.U. 2019 poz. 1781 (u.o.d.o.)
-  TREŚĆ:
-  [treść artykułu]
+Decyzje UODO mogą mieć do 50 000 znaków, ale do kontekstu trafia max 2000 znaków — algorytm przesuwa okno o 150 znaków i szuka fragmentu z najwyższą gęstością słów kluczowych.
 
----
-[3] RODO (rozporządzenie 2016/679) — Art. 9
-  ŹRÓDŁO: Dz.Urz. UE L 119/1
-  TREŚĆ:
-  [treść artykułu]
-```
-
-Nagłówek kontekstu jawnie informuje model o wszystkich trzech typach dokumentów — wcześniej brak tej informacji powodował, że duże modele (jak kimi2.5) interpretowały kontekst jako "wyłącznie przepisy RODO" i twierdziły, że nie ma decyzji UODO.
-
-### 8.3 Ekstrakcja fragmentów
-
-Decyzje UODO mogą mieć do 50 000 znaków. Do kontekstu trafia max 2000 znaków — `_extract_fragment()` wybiera okno o najwyższej gęstości słów kluczowych z zapytania:
-
-```python
-# Przeszukuje treść krokiem 150 znaków
-# Dla każdej pozycji liczy, ile razy słowa kluczowe pojawiają się w oknie 2000 znaków
-# Wybiera pozycję z najwyższym wynikiem
-step = 150
-for pos in range(0, len(content) - max_len, step):
-    score = sum(content[pos:pos+max_len].count(kw) for kw in keywords)
-    if score > best_score:
-        best_score, best_pos = score, pos
-```
-
-### 8.4 Limit znaków
-
-Kontekst jest budowany do limitu 18 000 znaków. Gdy kolejny blok przekroczyłby limit, pętla się przerywa i dodaje notatkę `[pominięto N dalszych wyników]`. Ponieważ decyzje są sortowane jako pierwsze, mają gwarancję trafienia do kontekstu przed artykułami RODO.
+Kontekst jest budowany do limitu 18 000 znaków. Gdy kolejny blok przekroczyłby limit, pętla się przerywa i dodaje notatkę `[pominięto N dalszych wyników]`.
 
 ---
 
@@ -412,74 +655,36 @@ Kontekst jest budowany do limitu 18 000 znaków. Gdy kolejny blok przekroczyłby
 
 ### 9.1 Streamlit i session_state
 
-Streamlit rerenderuje cały skrypt przy każdej interakcji użytkownika. `st.session_state` to słownik persystujący między rerenderami — przechowuje m.in.:
-- `llm_provider`, `llm_model`, `llm_api_key` — konfiguracja LLM z sidebara
-- `last_query`, `last_filters` — żeby nie wykonywać wyszukiwania przy każdym rerenderze
-- `agent_memory` — obiekt `AgentMemory` z historią sesji
-- `_example_query` — tymczasowe przechowywanie pytania klikniętego z przykładów
+Streamlit rerenderuje cały skrypt przy każdej interakcji użytkownika. `st.session_state` to słownik persystujący między rerenderami — przechowuje konfigurację LLM, ostatnie zapytanie i filtry (żeby nie wykonywać wyszukiwania przy każdym rerenderze), historię sesji i ostatnią odpowiedź AI (żeby nie znikała po rerenderze).
 
 ### 9.2 Trigger wyszukiwania
 
-Wyszukiwanie uruchamia się gdy:
-```python
-if effective_query and (
-    search_btn                                           # kliknięto "Szukaj"
-    or st.session_state.get("last_query") != query       # zmieniło się zapytanie
-    or st.session_state.get("last_filters") != str(filters)  # zmieniły się filtry
-):
-```
-
-Ta logika zapobiega wielokrotnemu wyszukiwaniu przy każdym rerenderze Streamlit.
+Wyszukiwanie uruchamia się gdy kliknięto "Szukaj", zmieniło się zapytanie lub zmieniły się filtry. Ta logika zapobiega wielokrotnemu wyszukiwaniu przy każdym rerenderze Streamlit.
 
 ### 9.3 Fast path po sygnaturze
 
-Jeśli zapytanie pasuje do wyrażenia regularnego sygnatury (`DKN.XXXX.XX.XXXX`), aplikacja pomija wyszukiwanie semantyczne i bezpośrednio pobiera decyzję z Qdrant przez `fetch_by_signature()`. Ewentualnie dokłada powiązane decyzje z grafu cytowań.
+Jeśli zapytanie pasuje do wyrażenia regularnego sygnatury (`DKN.XXXX.XX.XXXX`), aplikacja pomija wyszukiwanie semantyczne i bezpośrednio pobiera decyzję z Qdrant. Ewentualnie dokłada powiązane decyzje z grafu cytowań.
 
 ### 9.4 Zakładki wyników
 
-Wyniki są prezentowane w pięciu zakładkach:
-- **Wszystkie** — wszystkie dokumenty w kolejności zwróconej przez wyszukiwanie
-- **Decyzje UODO** — tylko orzeczenia, z pełnymi kartami
-- **Ustawa u.o.d.o.** — artykuły ustawy
-- **RODO** — artykuły i motywy RODO
-- **Graf** — decyzje dodane przez rozszerzenie grafu (oznaczone typem relacji)
+Wyniki są prezentowane w pięciu zakładkach: Wszystkie, Decyzje UODO, Ustawa u.o.d.o., RODO, Graf. Karty decyzji wyświetlają sygnaturę jako link do portalu UODO, status prawny (kolorowy badge), tytuł pełny, tagi i powołane akty.
 
-### 9.5 Karty dokumentów
-
-Każdy typ dokumentu ma własną funkcję renderowania (`render_decision_card`, `render_act_article_card`, `render_gdpr_card`). Karty decyzji wyświetlają:
-- Sygnaturę jako link do portalu UODO
-- Status prawny (kolorowy badge: zielony = prawomocna, niebieski = nieprawomocna)
-- Tytuł pełny (opis naruszenia)
-- Tagi (pierwszych 8, z informacją ile więcej)
-- Powołane akty prawne
-
-CSS jest wzorowany bezpośrednio na portalu orzeczenia.uodo.gov.pl (zmienne CSS, typografia Red Hat Display).
+CSS jest wzorowany bezpośrednio na portalu orzeczenia.uodo.gov.pl — zmienne CSS, typografia Red Hat Display.
 
 ---
 
 ## 10. Pamięć epizodyczna
 
-`AgentMemory` przechowuje ostatnie 5 wyszukiwań z bieżącej sesji. Każdy wpis (`MemoryEntry`) zawiera:
-- Oryginalne i wzbogacone zapytanie
-- Streszczenie dekompozycji (reasoning LLM)
-- Sygnatury znalezionych decyzji (top 5)
-- Numery artykułów u.o.d.o. (top 3)
-- Pierwszych 300 znaków odpowiedzi AI
+`AgentMemory` przechowuje ostatnie 5 wyszukiwań z bieżącej sesji. Każdy wpis zawiera: oryginalne i wzbogacone zapytanie, streszczenie dekompozycji, sygnatury znalezionych decyzji (top 5), numery artykułów u.o.d.o. (top 3) i pierwsze 300 znaków odpowiedzi AI.
 
-### Zastosowanie w kontekście
-
-Jeśli bieżące zapytanie ma wspólne słowa z poprzednim zapytaniem, `find_related()` dołącza do kontekstu LLM notatkę:
+Jeśli bieżące zapytanie ma wspólne słowa z poprzednim, do kontekstu LLM dołączana jest notatka:
 
 ```
 KONTEKST Z POPRZEDNICH ANALIZ (tej sesji):
 - Poprzednie pytanie: «dane genetyczne» → znalezione decyzje: DKN.5110.16.2022, DKN.5131.9.2025
 ```
 
-Pozwala to LLM uwzględnić poprzednie wyniki bez konieczności ponownego wyszukiwania.
-
-### Zastosowanie w sidbarze
-
-Historia sesji jest widoczna w panelu bocznym jako ekspandery — użytkownik widzi jakie pytania zadał, które decyzje znalazł i fragment odpowiedzi AI.
+Pozwala to LLM uwzględnić poprzednie wyniki bez konieczności ponownego wyszukiwania. Historia sesji jest też widoczna w panelu bocznym jako ekspandery.
 
 ---
 
@@ -490,19 +695,18 @@ Historia sesji jest widoczna w panelu bocznym jako ekspandery — użytkownik wi
 Centralne miejsce wszystkich stałych. Kluczowe wartości:
 
 ```python
-MAX_ACT_DOCS  = 5    # max artykułów u.o.d.o. w wynikach
-MAX_GDPR_DOCS = 3    # max artykułów RODO w wynikach
-TOP_K         = 8    # domyślne top_k dla semantic search
-GRAPH_DEPTH   = 2    # głębokość przeszukiwania grafu
+MAX_ACT_DOCS         = 5    # max artykułów u.o.d.o. w wynikach
+MAX_GDPR_DOCS        = 3    # max artykułów RODO w wynikach
+TOP_K                = 8    # domyślne top_k dla semantic search
+GRAPH_DEPTH          = 2    # głębokość przeszukiwania grafu
+_MAX_RESULTS_PER_TAG = 50   # max decyzji per tag (zbyt ogólne tagi odrzucamy)
 ```
 
-`QUERY_STOPWORDS` — zbiór polskich słów funkcyjnych pomijanych przy ekstrakcji fraz z zapytania. Bez nich "w jakie dane genetyczne są przetwarzane" generowałby frazy "jakie dane", "dane genetyczne" — stopwords zostawia tylko "dane genetyczne".
+`QUERY_STOPWORDS` — zbiór polskich słów funkcyjnych pomijanych przy ekstrakcji fraz. Bez nich zapytanie "w jakie dane genetyczne są przetwarzane" generowałoby frazy "jakie dane", "dane genetyczne" — stopwords zostawia tylko "dane genetyczne".
 
 ### 11.2 models.py — modele Pydantic
 
-`QueryDecomposition` i `AgentMemory` / `MemoryEntry` są modelami Pydantic — zapewnia to walidację typów i czytelną serializację. Jeśli LLM zwróci niepoprawny JSON, Pydantic rzuca wyjątek który jest obsługiwany z fallbackiem.
-
-Szablony Jinja2 (`TPL_HEADER`, `TPL_DECISION` itd.) są kompilowane raz przy imporcie modułu i współdzielone przez cały czas życia aplikacji.
+`QueryDecomposition` i `AgentMemory`/`MemoryEntry` są modelami Pydantic — gwarantuje to walidację typów i obsługę błędów parsowania JSON od LLM. Szablony Jinja2 są kompilowane raz przy imporcie modułu i współdzielone przez cały czas życia aplikacji.
 
 ---
 
@@ -510,9 +714,8 @@ Szablony Jinja2 (`TPL_HEADER`, `TPL_DECISION` itd.) są kompilowane raz przy imp
 
 ### eval.py — ewaluacja jakości
 
-10 złotych pytań z binarnymi kryteriami sprawdzenia. Każde pytanie ma 3 check funkcje (lambda) testujące obecność konkretnych słów/sygnatur/artykułów w odpowiedzi LLM. Wynik: `passed/total` dla każdego pytania + agregat procentowy. Wyniki zapisywane do `eval_results.json`.
+10 złotych pytań z binarnymi kryteriami sprawdzenia. Każde pytanie ma 3 funkcje testujące obecność konkretnych słów/sygnatur/artykułów w odpowiedzi LLM. Wynik: `passed/total` dla każdego pytania + agregat procentowy zapisywany do `eval_results.json`.
 
-Przykład:
 ```python
 {
     "question": "Kiedy wymagane jest zgłoszenie naruszenia danych do UODO?",
@@ -526,7 +729,7 @@ Przykład:
 
 ### enrich_act_keywords.py
 
-Dla artykułów u.o.d.o. i RODO które nie mają tagów, wywołuje LLM z treścią artykułu i listą istniejących tagów z decyzji UODO. LLM wybiera pasujące tagi i zapisuje je bezpośrednio do Qdrant przez `client.set_payload()` — bez przeindeksowania.
+Dla artykułów u.o.d.o. i RODO które nie mają tagów, wywołuje LLM z treścią artykułu i listą istniejących tagów z decyzji UODO. LLM wybiera pasujące tagi i zapisuje je bezpośrednio do Qdrant przez `client.set_payload()` — bez przeindeksowania wektorów.
 
 ---
 
@@ -534,24 +737,20 @@ Dla artykułów u.o.d.o. i RODO które nie mają tagów, wywołuje LLM z treści
 
 ### Dlaczego jedna kolekcja Qdrant?
 
-Wszystkie trzy typy dokumentów (decyzje, ustawa, RODO) trafiają do jednej kolekcji `uodo_decisions`. Alternatywą byłyby osobne kolekcje, ale wymuszałoby to osobne zapytania i ręczne łączenie wyników. Jedna kolekcja pozwala filtrować po `doc_type` w jednym zapytaniu i utrzymuje prostszą architekturę.
+Wszystkie trzy typy dokumentów trafiają do jednej kolekcji `uodo_decisions`. Alternatywą byłyby osobne kolekcje, ale wymuszałoby to osobne zapytania i ręczne łączenie wyników. Jedna kolekcja pozwala filtrować po `doc_type` w jednym zapytaniu i utrzymuje prostszą architekturę.
 
 ### Dlaczego frazy z zapytania zamiast tylko LLM do tagów?
 
 Pierwsze podejście używało LLM do doboru tagów zawsze. Problem: dla zapytania "dane genetyczne" LLM proponował też "dane biometryczne", "dane szczególnych kategorii", "zdrowie" — co dawało 100+ wyników zamiast 26. Bezpośrednie dopasowanie fraz jest deterministyczne, szybkie (cache tagów) i precyzyjne.
 
-### Dlaczego nie przebudować embeddingów i zrobić full-text search zamiast tagów?
+### Dlaczego osobne kubełki zamiast jednej listy wyników?
 
-Semantyczny search rozumie sens, ale nie gwarantuje pełnego recall. Dla pytania prawnego "jakie decyzje dotyczą danych genetycznych" użytkownik oczekuje **wszystkich** decyzji z tagiem — nie top-k najbardziej semantycznie podobnych. Tagi są precyzyjne, bo zostały przypisane przez ekspertów portalu UODO, a nie wygenerowane automatycznie.
-
-### Dlaczego osobne buckety zamiast jednej listy wyników?
-
-Gdyby wszystkie dokumenty były w jednej liście sortowanej po score, artykuły RODO (które mają wysoki score semantyczny dla pytań o dane genetyczne, bo Art. 9 RODO definiuje je wprost) wypychałyby decyzje UODO poza limit kontekstu. Osobne buckety z twardymi limitami (max 5 u.o.d.o., max 3 RODO) gwarantują, że decyzje UODO zawsze trafiają do kontekstu LLM.
+Gdyby wszystkie dokumenty były w jednej liście sortowanej po score, artykuły RODO (które mają wysoki score semantyczny dla pytań o dane genetyczne, bo Art. 9 RODO definiuje je wprost) wypychałyby decyzje UODO poza limit kontekstu. Osobne kubełki z twardymi limitami (max 5 u.o.d.o., max 3 RODO) gwarantują że decyzje UODO zawsze trafiają do kontekstu LLM.
 
 ### Dlaczego Streamlit zamiast FastAPI + React?
 
-Streamlit pozwala na bardzo szybkie prototypowanie i iterowanie bez osobnego frontendu. Dla wewnętrznego narzędzia analitycznego jest wystarczający. Wadą jest ograniczona kontrola nad UI i rerenderowanie przy każdej interakcji — stąd `st.session_state` do cache'owania wyników wyszukiwania.
+Streamlit pozwala na bardzo szybkie prototypowanie i iterowanie bez osobnego frontendu. Dla wewnętrznego narzędzia analitycznego jest wystarczający. Wadą jest ograniczona kontrola nad UI i rerenderowanie przy każdej interakcji — stąd `st.session_state` do cache'owania wyników wyszukiwania i odpowiedzi AI.
 
 ### Dlaczego graf zapisywany do pliku .pkl?
 
-Budowanie grafu wymaga scrollowania przez całą kolekcję Qdrant (~560 decyzji × metadane). Przy każdym starcie aplikacji byłoby to powolne. Plik `.pkl` jest ładowany w ułamku sekundy. Graf jest przebudowywany tylko gdy plik nie istnieje — po dodaniu nowych decyzji trzeba go usunąć ręcznie, żeby wymusić przebudowanie.
+Budowanie grafu wymaga scrollowania przez całą kolekcję Qdrant (~560 decyzji × metadane). Przy każdym starcie aplikacji byłoby to powolne. Plik `.pkl` jest ładowany w ułamku sekundy. Graf jest przebudowywany tylko gdy plik nie istnieje — po dodaniu nowych decyzji trzeba go usunąć ręcznie żeby wymusić przebudowanie.
