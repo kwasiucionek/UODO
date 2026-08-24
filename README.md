@@ -1,5 +1,7 @@
 # 🔐 UODO RAG — Wyszukiwarka Decyzji i Przepisów
 
+**Demo:** https://lexsearch.cytr.us
+
 Aplikacja RAG (Retrieval-Augmented Generation) do przeszukiwania decyzji Prezesa Urzędu Ochrony Danych Osobowych oraz przepisów ustawy o ochronie danych osobowych i rozporządzenia RODO.
 
 Wygląd i filtry wzorowane na oficjalnym [Portalu Orzeczeń UODO](https://orzeczenia.uodo.gov.pl).
